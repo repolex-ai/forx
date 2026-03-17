@@ -1,12 +1,6 @@
-"""Discover version tags from GitHub repos."""
+"""Discover tags from GitHub repos."""
 
-import re
 import subprocess
-from collections import defaultdict
-from packaging.version import parse as parse_version, InvalidVersion
-
-
-SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
 
 def get_git_tags(repo_full_name: str) -> list[str]:
@@ -35,51 +29,24 @@ def get_git_tags(repo_full_name: str) -> list[str]:
     return tags
 
 
-def filter_semver(tags: list[str]) -> list[tuple[str, str]]:
+def get_head_sha(repo_full_name: str) -> str:
+    """Get the HEAD commit SHA for a repo's default branch."""
+    result = subprocess.run(
+        ["git", "ls-remote", f"https://github.com/{repo_full_name}.git", "HEAD"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to get HEAD for {repo_full_name}: {result.stderr.strip()}")
+
+    line = result.stdout.strip().split("\n")[0]
+    return line.split("\t")[0]
+
+
+def discover_repo(repo_full_name: str) -> list[str]:
     """
-    Filter to semver tags. Returns [(clean_version, original_git_tag), ...].
-    Handles v-prefixed and plain tags.
+    Discover all tags for a repo. Returns them as-is, no filtering.
+    The git tag is what we checkout, no transformation needed.
     """
-    results = []
-    for tag in tags:
-        clean = tag.lstrip("v")
-        if SEMVER_RE.match(clean):
-            results.append((clean, tag))
-    return results
-
-
-def select_smart(tag_pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """
-    Select latest patch per major.minor series.
-    Input/output: [(clean_version, git_tag), ...]
-    """
-    by_major_minor: dict[tuple, list[tuple[str, str]]] = defaultdict(list)
-
-    for clean_ver, git_tag in tag_pairs:
-        try:
-            v = parse_version(clean_ver)
-            key = (v.major, v.minor)
-            by_major_minor[key].append((clean_ver, git_tag))
-        except InvalidVersion:
-            continue
-
-    result = []
-    for pairs in by_major_minor.values():
-        latest = max(pairs, key=lambda p: parse_version(p[0]))
-        result.append(latest)
-
-    return sorted(result, key=lambda p: parse_version(p[0]))
-
-
-def discover_repo(repo_full_name: str) -> list[tuple[str, str]]:
-    """
-    Discover parseable version tags for a repo.
-    Returns [(clean_version, git_tag), ...] sorted by version.
-    """
-    all_tags = get_git_tags(repo_full_name)
-    semver = filter_semver(all_tags)
-
-    if not semver:
-        return []
-
-    return select_smart(semver)
+    return get_git_tags(repo_full_name)

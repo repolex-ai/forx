@@ -19,13 +19,15 @@ def cli(ctx):
 
 @cli.command()
 @click.argument("repos", nargs=-1, required=True)
+@click.option("--head", is_flag=True, help="Parse HEAD instead of tags (for repos without releases)")
 @click.pass_context
-def add(ctx, repos):
-    """Add repos to parse. Discovers version tags automatically.
+def add(ctx, repos, head):
+    """Add repos to parse. Discovers tags automatically.
 
     Examples:
         forx add TopQuadrant/shacl
         forx add pallets/click encode/httpx Textualize/rich
+        forx add --head TopQuadrant/shacl-js
     """
     conn = ctx.obj["conn"]
 
@@ -36,10 +38,13 @@ def add(ctx, repos):
 
         console.print(f"[cyan]Adding {repo}...[/]")
 
-        # Add repo to DB
-        repo_id = db.add_repo(conn, repo)
+        repo_id = db.add_repo(conn, repo, head_only=head)
 
-        # Discover tags
+        if head:
+            console.print(f"  [green]Added as HEAD-only (will parse default branch)[/]")
+            continue
+
+        # Discover all tags
         console.print(f"  Discovering tags...", end=" ")
         try:
             tags = discover.discover_repo(repo)
@@ -48,18 +53,57 @@ def add(ctx, repos):
             continue
 
         if not tags:
-            console.print("[yellow]no semver tags found[/]")
+            console.print("[yellow]no tags found[/]")
             continue
 
-        console.print(f"[green]{len(tags)} versions[/]")
+        console.print(f"[green]{len(tags)} tags[/]")
 
         # Add tags to DB
         db.add_tags(conn, repo_id, tags)
 
         # Show what we found
-        for version, git_tag in tags:
-            suffix = f" ({git_tag})" if git_tag != version else ""
-            console.print(f"    {version}{suffix}")
+        for tag in tags:
+            console.print(f"    {tag}")
+
+
+@cli.command()
+@click.argument("repo")
+@click.pass_context
+def parse(ctx, repo):
+    """Force an immediate parse of a repo (even if recently parsed).
+
+    For HEAD-only repos, resets the cooldown so it gets picked up next run.
+    For tagged repos, retries any failed tags.
+
+    Examples:
+        forx parse TopQuadrant/shacl-js
+        forx parse certifi/python-certifi
+    """
+    conn = ctx.obj["conn"]
+
+    row = conn.execute("SELECT * FROM repos WHERE full_name = ?", (repo,)).fetchone()
+    if not row:
+        console.print(f"[red]Repo {repo} not tracked. Use: forx add {repo}[/]")
+        return
+
+    if row["head_only"]:
+        # Reset cooldown so it gets picked up
+        conn.execute(
+            "UPDATE repos SET last_head_parsed = NULL WHERE full_name = ?",
+            (repo,),
+        )
+        conn.commit()
+        console.print(f"[green]Reset HEAD parse cooldown for {repo} - will parse on next run[/]")
+    else:
+        # Reset failed tags to pending
+        rows = conn.execute(
+            """UPDATE tags SET status = 'pending', error = NULL, workflow_run_id = NULL
+               WHERE status = 'failed' AND repo_id = ?
+               RETURNING id""",
+            (row["id"],),
+        ).fetchall()
+        conn.commit()
+        console.print(f"[green]Reset {len(rows)} failed tags to pending for {repo}[/]")
 
 
 @cli.command()
@@ -81,7 +125,7 @@ def status(ctx):
 
     # Show per-repo breakdown
     rows = conn.execute(
-        """SELECT r.full_name,
+        """SELECT r.full_name, r.head_only,
                   COUNT(t.id) as total,
                   SUM(CASE WHEN t.status = 'pending' THEN 1 ELSE 0 END) as pending,
                   SUM(CASE WHEN t.status = 'dispatched' THEN 1 ELSE 0 END) as dispatched,
@@ -99,6 +143,7 @@ def status(ctx):
 
     table = Table(title="Repos")
     table.add_column("Repo")
+    table.add_column("Type", justify="center")
     table.add_column("Total", justify="right")
     table.add_column("Pending", justify="right")
     table.add_column("Running", justify="right")
@@ -106,8 +151,10 @@ def status(ctx):
     table.add_column("Failed", justify="right")
 
     for row in rows:
+        repo_type = "HEAD" if row["head_only"] else "tags"
         table.add_row(
             row["full_name"],
+            repo_type,
             str(row["total"]),
             str(row["pending"]),
             str(row["dispatched"]),
@@ -163,8 +210,13 @@ def list_repos(ctx):
         return
 
     for repo in repos:
+        if repo["head_only"]:
+            last = repo["last_head_parsed"] or "never"
+            console.print(f"\n[bold]{repo['full_name']}[/] → {repo['storage_repo']} [dim](HEAD, last: {last})[/]")
+            continue
+
         tags = conn.execute(
-            "SELECT version, git_tag, status FROM tags WHERE repo_id = ? ORDER BY version",
+            "SELECT git_tag, status FROM tags WHERE repo_id = ? ORDER BY id",
             (repo["id"],),
         ).fetchall()
 
@@ -182,4 +234,4 @@ def list_repos(ctx):
                 "complete": "●",
                 "failed": "✗",
             }.get(tag["status"], "?")
-            console.print(f"  [{status_style}]{marker} {tag['version']}[/]")
+            console.print(f"  [{status_style}]{marker} {tag['git_tag']}[/]")

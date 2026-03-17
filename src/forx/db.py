@@ -6,35 +6,40 @@ from pathlib import Path
 
 DEFAULT_DB_PATH = Path.home() / ".forx" / "forx.db"
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS repos (
-    id INTEGER PRIMARY KEY,
-    org TEXT NOT NULL,
-    name TEXT NOT NULL,
-    full_name TEXT NOT NULL UNIQUE,  -- org/name
-    storage_repo TEXT NOT NULL,       -- repolex-forx/org--name
-    language TEXT,
-    added_at TEXT NOT NULL,
-    UNIQUE(org, name)
-);
+MIGRATIONS = [
+    # v1: initial schema
+    """
+    CREATE TABLE IF NOT EXISTS repos (
+        id INTEGER PRIMARY KEY,
+        org TEXT NOT NULL,
+        name TEXT NOT NULL,
+        full_name TEXT NOT NULL UNIQUE,  -- org/name
+        storage_repo TEXT NOT NULL,       -- repolex-forx/org--name
+        language TEXT,
+        head_only INTEGER NOT NULL DEFAULT 0,  -- 1 = no tags, parse HEAD
+        last_head_parsed TEXT,                  -- when HEAD was last parsed
+        head_sha TEXT,                          -- last parsed HEAD commit
+        added_at TEXT NOT NULL,
+        UNIQUE(org, name)
+    );
 
-CREATE TABLE IF NOT EXISTS tags (
-    id INTEGER PRIMARY KEY,
-    repo_id INTEGER NOT NULL REFERENCES repos(id),
-    version TEXT NOT NULL,     -- clean version: 1.0.0
-    git_tag TEXT NOT NULL,     -- original git tag: v1.0.0
-    commit_sha TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',  -- pending, dispatched, parsing, complete, failed
-    workflow_run_id TEXT,      -- GitHub Actions run ID
-    dispatched_at TEXT,
-    completed_at TEXT,
-    error TEXT,
-    UNIQUE(repo_id, version)
-);
+    CREATE TABLE IF NOT EXISTS tags (
+        id INTEGER PRIMARY KEY,
+        repo_id INTEGER NOT NULL REFERENCES repos(id),
+        git_tag TEXT NOT NULL,     -- the actual git tag (used for checkout)
+        commit_sha TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',  -- pending, dispatched, parsing, complete, failed
+        workflow_run_id TEXT,      -- GitHub Actions run ID
+        dispatched_at TEXT,
+        completed_at TEXT,
+        error TEXT,
+        UNIQUE(repo_id, git_tag)
+    );
 
-CREATE INDEX IF NOT EXISTS idx_tags_status ON tags(status);
-CREATE INDEX IF NOT EXISTS idx_tags_repo_status ON tags(repo_id, status);
-"""
+    CREATE INDEX IF NOT EXISTS idx_tags_status ON tags(status);
+    CREATE INDEX IF NOT EXISTS idx_tags_repo_status ON tags(repo_id, status);
+    """,
+]
 
 
 def get_db(db_path: Path | None = None) -> sqlite3.Connection:
@@ -46,8 +51,55 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(SCHEMA)
+
+    # Check if we need to migrate (fresh DB or old schema)
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+
+    if "repos" not in tables:
+        # Fresh DB - apply schema
+        conn.executescript(MIGRATIONS[0])
+    elif "version" not in {r[1] for r in conn.execute("PRAGMA table_info(tags)").fetchall()}:
+        # Already on new schema (git_tag based, no version column)
+        pass
+    else:
+        # Old schema with 'version' column - migrate
+        _migrate_v0_to_v1(conn)
+
     return conn
+
+
+def _migrate_v0_to_v1(conn: sqlite3.Connection):
+    """Migrate from old schema (version+git_tag) to new (git_tag only)."""
+    conn.executescript("""
+        -- Add new columns to repos
+        ALTER TABLE repos ADD COLUMN head_only INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE repos ADD COLUMN last_head_parsed TEXT;
+        ALTER TABLE repos ADD COLUMN head_sha TEXT;
+
+        -- Recreate tags table without version column
+        CREATE TABLE tags_new (
+            id INTEGER PRIMARY KEY,
+            repo_id INTEGER NOT NULL REFERENCES repos(id),
+            git_tag TEXT NOT NULL,
+            commit_sha TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            workflow_run_id TEXT,
+            dispatched_at TEXT,
+            completed_at TEXT,
+            error TEXT,
+            UNIQUE(repo_id, git_tag)
+        );
+
+        INSERT OR IGNORE INTO tags_new (id, repo_id, git_tag, commit_sha, status, workflow_run_id, dispatched_at, completed_at, error)
+            SELECT id, repo_id, git_tag, commit_sha, status, workflow_run_id, dispatched_at, completed_at, error
+            FROM tags;
+
+        DROP TABLE tags;
+        ALTER TABLE tags_new RENAME TO tags;
+
+        CREATE INDEX IF NOT EXISTS idx_tags_status ON tags(status);
+        CREATE INDEX IF NOT EXISTS idx_tags_repo_status ON tags(repo_id, status);
+    """)
 
 
 def now() -> str:
@@ -55,15 +107,15 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def add_repo(conn: sqlite3.Connection, full_name: str) -> int:
+def add_repo(conn: sqlite3.Connection, full_name: str, head_only: bool = False) -> int:
     """Add a repo to track. Returns repo id."""
     org, name = full_name.split("/", 1)
     storage_repo = f"repolex-forx/{full_name.replace('/', '--')}"
 
     conn.execute(
-        """INSERT OR IGNORE INTO repos (org, name, full_name, storage_repo, added_at)
-           VALUES (?, ?, ?, ?, ?)""",
-        (org, name, full_name, storage_repo, now()),
+        """INSERT OR IGNORE INTO repos (org, name, full_name, storage_repo, head_only, added_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (org, name, full_name, storage_repo, int(head_only), now()),
     )
     conn.commit()
 
@@ -71,12 +123,12 @@ def add_repo(conn: sqlite3.Connection, full_name: str) -> int:
     return row["id"]
 
 
-def add_tags(conn: sqlite3.Connection, repo_id: int, tags: list[tuple[str, str]]):
-    """Add discovered tags for a repo. tags = [(version, git_tag), ...]"""
+def add_tags(conn: sqlite3.Connection, repo_id: int, git_tags: list[str]):
+    """Add discovered tags for a repo."""
     conn.executemany(
-        """INSERT OR IGNORE INTO tags (repo_id, version, git_tag, status)
-           VALUES (?, ?, ?, 'pending')""",
-        [(repo_id, version, git_tag) for version, git_tag in tags],
+        """INSERT OR IGNORE INTO tags (repo_id, git_tag, status)
+           VALUES (?, ?, 'pending')""",
+        [(repo_id, tag) for tag in git_tags],
     )
     conn.commit()
 
@@ -89,7 +141,7 @@ def get_pending_tags(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.
     running up to `limit` repos in parallel.
     """
     return conn.execute(
-        """SELECT t.id, t.version, t.git_tag, t.commit_sha,
+        """SELECT t.id, t.git_tag, t.commit_sha,
                   r.full_name, r.storage_repo, r.org, r.name
            FROM tags t
            JOIN repos r ON t.repo_id = r.id
@@ -108,7 +160,7 @@ def get_pending_tags(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.
 def get_dispatched_tags(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Get tags currently dispatched/parsing."""
     return conn.execute(
-        """SELECT t.id, t.version, t.git_tag, t.workflow_run_id, t.dispatched_at,
+        """SELECT t.id, t.git_tag, t.workflow_run_id, t.dispatched_at,
                   r.full_name, r.storage_repo
            FROM tags t
            JOIN repos r ON t.repo_id = r.id
@@ -142,6 +194,28 @@ def mark_failed(conn: sqlite3.Connection, tag_id: int, error: str = ""):
         (now(), error, tag_id),
     )
     conn.commit()
+
+
+def mark_head_parsed(conn: sqlite3.Connection, repo_id: int, sha: str):
+    """Mark a HEAD-only repo as parsed."""
+    conn.execute(
+        "UPDATE repos SET last_head_parsed = ?, head_sha = ? WHERE id = ?",
+        (now(), sha, repo_id),
+    )
+    conn.commit()
+
+
+def get_head_repos_needing_parse(conn: sqlite3.Connection, cooldown_days: int = 7) -> list[sqlite3.Row]:
+    """Get HEAD-only repos that haven't been parsed recently."""
+    return conn.execute(
+        """SELECT id, full_name, storage_repo, head_sha, last_head_parsed
+           FROM repos
+           WHERE head_only = 1
+             AND (last_head_parsed IS NULL
+                  OR last_head_parsed < datetime('now', '-' || ? || ' days'))
+           ORDER BY last_head_parsed NULLS FIRST""",
+        (cooldown_days,),
+    ).fetchall()
 
 
 def reset_stale_dispatched(conn: sqlite3.Connection, minutes: int = 60):
