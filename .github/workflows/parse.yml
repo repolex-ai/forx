@@ -86,6 +86,7 @@ jobs:
           cd ${{ github.workspace }}
           git config user.name "repolex-bot"
           git config user.email "bot@repolex.ai"
+          git pull --rebase origin main || true
           git add .
           git diff --staged --quiet && echo "No changes to commit" && exit 0
           git commit -m "Parse ${{ inputs.repo }}@${{ inputs.tag }} (${{ env.COMMIT_SHA }})"
