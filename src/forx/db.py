@@ -82,14 +82,24 @@ def add_tags(conn: sqlite3.Connection, repo_id: int, tags: list[tuple[str, str]]
 
 
 def get_pending_tags(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.Row]:
-    """Get next tags to parse, round-robin across repos."""
+    """
+    Get next tags to parse: one per repo, skipping repos that already
+    have a dispatched job. This ensures sequential parsing within a repo
+    (so each job builds on the previous one's blob cache) while still
+    running up to `limit` repos in parallel.
+    """
     return conn.execute(
         """SELECT t.id, t.version, t.git_tag, t.commit_sha,
                   r.full_name, r.storage_repo, r.org, r.name
            FROM tags t
            JOIN repos r ON t.repo_id = r.id
            WHERE t.status = 'pending'
-           ORDER BY r.id, t.id
+             AND r.id NOT IN (
+               SELECT DISTINCT repo_id FROM tags WHERE status IN ('dispatched', 'parsing')
+             )
+           GROUP BY r.id
+           HAVING t.id = MIN(t.id)
+           ORDER BY r.id
            LIMIT ?""",
         (limit,),
     ).fetchall()
