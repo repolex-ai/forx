@@ -13,40 +13,40 @@ on:
         description: 'Storage repo (repolex-forx/org--name)'
         required: true
 
-permissions:
-  contents: write
-
 jobs:
   parse:
     runs-on: ubuntu-latest
     steps:
-      - name: Check if storage repo exists
-        id: check_repo
+      - name: Setup storage repo
         env:
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
-          if gh repo view ${{ inputs.storage_repo }} &>/dev/null; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
+          # Create repo if it doesn't exist
+          if ! gh repo view ${{ inputs.storage_repo }} &>/dev/null; then
+            gh repo create ${{ inputs.storage_repo }} \
+              --public \
+              --description "RDF parse data for ${{ inputs.repo }}" \
+              --homepage "https://github.com/${{ inputs.repo }}"
           fi
 
-      - name: Create storage repo if needed
-        if: steps.check_repo.outputs.exists == 'false'
-        env:
-          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
-        run: |
-          gh repo create ${{ inputs.storage_repo }} \
-            --public \
-            --description "RDF parse data for ${{ inputs.repo }}" \
-            --homepage "https://github.com/${{ inputs.repo }}"
+          # Clone it (works for both empty and non-empty repos)
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ inputs.storage_repo }}.git" storage || {
+            mkdir storage && cd storage && git init
+            git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ inputs.storage_repo }}.git"
+          }
 
-      - name: Checkout storage repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ inputs.storage_repo }}
-          token: ${{ secrets.REPOLEX_PAT }}
-          fetch-depth: 0
+          cd storage
+          git config user.name "repolex-bot"
+          git config user.email "bot@repolex.ai"
+
+          # Ensure we have at least one commit
+          if ! git rev-parse HEAD &>/dev/null; then
+            echo "# RDF data for ${{ inputs.repo }}" > README.md
+            git add README.md
+            git commit -m "Initial commit"
+            git branch -M main
+            git push -u origin main
+          fi
 
       - name: Clone and checkout source
         run: |
@@ -75,17 +75,17 @@ jobs:
 
       - name: Parse repository
         env:
-          REPOLEX_HOME: ${{ github.workspace }}
+          REPOLEX_HOME: ${{ github.workspace }}/storage
         run: |
           cd /tmp/source
           repolex parse ${{ inputs.repo }} ${{ inputs.tag }}
           repolex aggregate ${{ inputs.repo }} ${{ inputs.tag }}
 
       - name: Commit and push
+        env:
+          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
-          cd ${{ github.workspace }}
-          git config user.name "repolex-bot"
-          git config user.email "bot@repolex.ai"
+          cd ${{ github.workspace }}/storage
           git pull --rebase origin main || true
           git add .
           git diff --staged --quiet && echo "No changes to commit" && exit 0
