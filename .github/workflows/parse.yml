@@ -1,0 +1,92 @@
+name: Parse Repository
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: 'Source repo (org/name)'
+        required: true
+      tag:
+        description: 'Git tag to parse'
+        required: true
+      storage_repo:
+        description: 'Storage repo (repolex-forx/org--name)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  parse:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if storage repo exists
+        id: check_repo
+        env:
+          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
+        run: |
+          if gh repo view ${{ inputs.storage_repo }} &>/dev/null; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create storage repo if needed
+        if: steps.check_repo.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
+        run: |
+          gh repo create ${{ inputs.storage_repo }} \
+            --public \
+            --description "RDF parse data for ${{ inputs.repo }}" \
+            --homepage "https://github.com/${{ inputs.repo }}"
+
+      - name: Checkout storage repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.storage_repo }}
+          token: ${{ secrets.REPOLEX_PAT }}
+          fetch-depth: 0
+
+      - name: Clone and checkout source
+        run: |
+          git clone https://github.com/${{ inputs.repo }}.git /tmp/source
+          cd /tmp/source
+          git fetch --tags
+          git checkout ${{ inputs.tag }}
+          echo "COMMIT_SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install repolex
+        env:
+          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
+        run: |
+          uv tool install "git+https://x-access-token:${GH_TOKEN}@github.com/repolex-ai/repolex-parser-py.git"
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Parse repository
+        env:
+          REPOLEX_HOME: ${{ github.workspace }}
+        run: |
+          cd /tmp/source
+          repolex parse ${{ inputs.repo }} ${{ inputs.tag }}
+          repolex aggregate ${{ inputs.repo }} ${{ inputs.tag }}
+
+      - name: Commit and push
+        run: |
+          cd ${{ github.workspace }}
+          git config user.name "repolex-bot"
+          git config user.email "bot@repolex.ai"
+          git add .
+          git diff --staged --quiet && echo "No changes to commit" && exit 0
+          git commit -m "Parse ${{ inputs.repo }}@${{ inputs.tag }} (${{ env.COMMIT_SHA }})"
+          git push
