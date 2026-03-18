@@ -76,6 +76,7 @@ jobs:
       - name: Parse repository
         env:
           REPOLEX_HOME: ${{ github.workspace }}/storage
+          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
           cd /tmp/source
           repolex parse ${{ inputs.repo }} ${{ inputs.tag }}
