@@ -21,7 +21,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
-          # Create repo if it doesn't exist
           if ! gh repo view ${{ inputs.storage_repo }} &>/dev/null; then
             gh repo create ${{ inputs.storage_repo }} \
               --public \
@@ -29,7 +28,6 @@ jobs:
               --homepage "https://github.com/${{ inputs.repo }}"
           fi
 
-          # Clone it (works for both empty and non-empty repos)
           git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ inputs.storage_repo }}.git" storage || {
             mkdir storage && cd storage && git init
             git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ inputs.storage_repo }}.git"
@@ -39,7 +37,6 @@ jobs:
           git config user.name "repolex-bot"
           git config user.email "bot@repolex.ai"
 
-          # Ensure we have at least one commit
           if ! git rev-parse HEAD &>/dev/null; then
             echo "Initializing" > README.md
             git add README.md
@@ -80,9 +77,10 @@ jobs:
         run: |
           cd /tmp/source
           repolex parse ${{ inputs.repo }} ${{ inputs.tag }}
-          repolex aggregate ${{ inputs.repo }} ${{ inputs.tag }}
 
-      - name: Flatten storage structure
+      - name: Flatten and commit parse results
+        env:
+          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
           cd ${{ github.workspace }}/storage
           ORG=$(echo "${{ inputs.repo }}" | cut -d/ -f1)
@@ -93,12 +91,44 @@ jobs:
             rm -rf files/
           fi
 
+          git pull --rebase origin main || true
+          git add .
+          git diff --staged --quiet && echo "No parse changes to commit" && exit 0
+          git commit -m "Parse ${{ inputs.repo }}@${{ inputs.tag }} (${{ env.COMMIT_SHA }})"
+          git push
+
+      - name: Aggregate repository
+        env:
+          REPOLEX_HOME: ${{ github.workspace }}/storage
+          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
+        run: |
+          cd /tmp/source
+          repolex aggregate ${{ inputs.repo }} ${{ inputs.tag }}
+
+      - name: Flatten and commit aggregate results
+        env:
+          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
+        run: |
+          cd ${{ github.workspace }}/storage
+          ORG=$(echo "${{ inputs.repo }}" | cut -d/ -f1)
+          REPO=$(echo "${{ inputs.repo }}" | cut -d/ -f2)
+
+          if [ -d "files/${ORG}/${REPO}" ]; then
+            cp -a "files/${ORG}/${REPO}/." .
+            rm -rf files/
+          fi
+
+          git pull --rebase origin main || true
+          git add .
+          git diff --staged --quiet && echo "No aggregate changes to commit" && exit 0
+          git commit -m "Aggregate ${{ inputs.repo }}@${{ inputs.tag }} (${{ env.COMMIT_SHA }})"
+          git push
+
       - name: Generate README
         run: |
           cd ${{ github.workspace }}/storage
           PARSE_DATE=$(date -u +"%Y-%m-%d")
 
-          # Build a tree view of the data
           TREE=$(find . -name '*.nq.gz' -o -name '*.nq' | grep -v '.git' | sed 's|^\./||' | sort | head -200 | tree --fromfile -n 2>/dev/null || find . \( -name '*.nq.gz' -o -name '*.nq' \) -not -path './.git/*' | sed 's|^\./||' | sort | awk -F/ '
           {
             for (i=1; i<NF; i++) {
@@ -152,14 +182,11 @@ jobs:
           ```
           READMEEOF
 
-          # Strip leading whitespace from heredoc
           sed -i 's/^          //' README.md
 
-          # Append the tree view
           echo "$TREE" >> README.md
           echo '```' >> README.md
 
-          # Append the directory descriptions
           cat >> README.md << 'DESCEOF'
 
           | Directory | What it contains |
@@ -182,16 +209,15 @@ jobs:
           *Parsed on PARSE_DATE_PLACEHOLDER by [repolex](https://repolex.ai)*
           DESCEOF
 
-          # Replace date placeholder
           sed -i "s/PARSE_DATE_PLACEHOLDER/${PARSE_DATE}/" README.md
 
-      - name: Commit and push
+      - name: Commit README
         env:
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
           cd ${{ github.workspace }}/storage
           git pull --rebase origin main || true
-          git add .
-          git diff --staged --quiet && echo "No changes to commit" && exit 0
-          git commit -m "Parse ${{ inputs.repo }}@${{ inputs.tag }} (${{ env.COMMIT_SHA }})"
+          git add README.md
+          git diff --staged --quiet && echo "No README changes" && exit 0
+          git commit -m "Update README for ${{ inputs.repo }}@${{ inputs.tag }}"
           git push
