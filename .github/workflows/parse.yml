@@ -139,7 +139,7 @@ jobs:
           To load this repo's data:
 
           ```bash
-          lexq download ${{ inputs.storage_repo }}
+          lexq download ${{ inputs.repo }}
           ```
 
           This will automatically download essential data files from the last parsed commit. Consult `lexq --moreinfo` for other options, including downloading multiple commits, blobs, etc.
