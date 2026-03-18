@@ -112,7 +112,7 @@ jobs:
           }' | head -60)
 
           cat > README.md << 'READMEEOF'
-          # ${{ inputs.repo }}
+          # Repolex Knowledge Graph of ${{ inputs.repo }}
 
           RDF knowledge graph data for [${{ inputs.repo }}](https://github.com/${{ inputs.repo }}), parsed by [repolex](https://repolex.ai).
 
