@@ -41,7 +41,7 @@ jobs:
 
           # Ensure we have at least one commit
           if ! git rev-parse HEAD &>/dev/null; then
-            echo "# RDF data for ${{ inputs.repo }}" > README.md
+            echo "Initializing" > README.md
             git add README.md
             git commit -m "Initial commit"
             git branch -M main
@@ -80,6 +80,109 @@ jobs:
           cd /tmp/source
           repolex parse ${{ inputs.repo }} ${{ inputs.tag }}
           repolex aggregate ${{ inputs.repo }} ${{ inputs.tag }}
+
+      - name: Flatten storage structure
+        run: |
+          cd ${{ github.workspace }}/storage
+          ORG=$(echo "${{ inputs.repo }}" | cut -d/ -f1)
+          REPO=$(echo "${{ inputs.repo }}" | cut -d/ -f2)
+
+          if [ -d "files/${ORG}/${REPO}" ]; then
+            cp -a "files/${ORG}/${REPO}/." .
+            rm -rf files/
+          fi
+
+      - name: Generate README
+        run: |
+          cd ${{ github.workspace }}/storage
+          PARSE_DATE=$(date -u +"%Y-%m-%d")
+
+          # Build a tree view of the data
+          TREE=$(find . -name '*.nq.gz' -o -name '*.nq' | grep -v '.git' | sed 's|^\./||' | sort | head -200 | tree --fromfile -n 2>/dev/null || find . \( -name '*.nq.gz' -o -name '*.nq' \) -not -path './.git/*' | sed 's|^\./||' | sort | awk -F/ '
+          {
+            for (i=1; i<NF; i++) {
+              prefix = ""
+              for (j=1; j<i; j++) prefix = prefix "    "
+              dir = prefix $i "/"
+              if (!(dir in seen)) { print dir; seen[dir]=1 }
+            }
+            prefix = ""
+            for (j=1; j<NF; j++) prefix = prefix "    "
+            print prefix $NF
+          }' | head -60)
+
+          cat > README.md << 'READMEEOF'
+          # ${{ inputs.repo }}
+
+          RDF knowledge graph data for [${{ inputs.repo }}](https://github.com/${{ inputs.repo }}), parsed by [repolex](https://repolex.ai).
+
+          > **Note**: This data is experimental and subject to change without notice.
+
+          ## How to use this data
+
+          The easiest way to get started is to install the [lexq](https://github.com/repolex-ai/lexq) query tool using [uv](https://docs.astral.sh/uv/getting-started/installation/).
+
+          If you have uv installed, just copy/paste this into your terminal:
+
+          ```bash
+          uv tool install git+https://github.com/repolex-ai/lexq
+          ```
+
+          This installs lexq onto your system, in your user context. Verify the install:
+
+          ```bash
+          lexq --help
+          ```
+
+          **lexq is designed to be used primarily by LLMs in a terminal.** Start up your favorite LLM and ask it to use the lexq tool. It's that easy!
+
+          To load this repo's data:
+
+          ```bash
+          lexq download ${{ inputs.storage_repo }}
+          ```
+
+          This will automatically download essential data files from the last parsed commit. Consult `lexq --moreinfo` for other options, including downloading multiple commits, blobs, etc.
+
+          ## Data structure
+
+          All data is stored as gzip-compressed [N-Quads](https://www.w3.org/TR/n-quads/) (`.nq.gz`), a standard RDF format that can be loaded into any triplestore or graph database.
+
+          ```
+          READMEEOF
+
+          # Strip leading whitespace from heredoc
+          sed -i 's/^          //' README.md
+
+          # Append the tree view
+          echo "$TREE" >> README.md
+          echo '```' >> README.md
+
+          # Append the directory descriptions
+          cat >> README.md << 'DESCEOF'
+
+          | Directory | What it contains |
+          |-----------|-----------------|
+          | `blob/` | Per-file AST graphs, content-addressed by git blob SHA. Each file in the source repo gets its own graph. |
+          | `aggregate/ast/` | Combined AST graph per parsed commit. Merges all blob graphs for a snapshot of the entire codebase at that point. |
+          | `aggregate/lsp/` | Language Server Protocol enrichment: resolved symbols, definitions, references, and type information. |
+          | `aggregate/dataflow/` | Interprocedural data flow edges between functions and modules. |
+          | `aggregate/repolex/` | Combined graph (AST + LSP + dataflow) per commit. |
+          | `commit/` | Git commit metadata (author, date, message, parent links). |
+          | `branch/` | Branch metadata. |
+          | `tag/` | Tag metadata. |
+          | `filetree/` | File tree snapshots per commit (which files existed and their blob SHAs). |
+
+          ## Source repository
+
+          [${{ inputs.repo }}](https://github.com/${{ inputs.repo }})
+
+          ---
+          *Parsed on PARSE_DATE_PLACEHOLDER by [repolex](https://repolex.ai)*
+          DESCEOF
+
+          # Replace date placeholder
+          sed -i "s/PARSE_DATE_PLACEHOLDER/${PARSE_DATE}/" README.md
 
       - name: Commit and push
         env:
