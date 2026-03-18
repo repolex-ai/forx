@@ -11,7 +11,7 @@ WORKFLOW_FILE = "parse.yml"
 WORKFLOW_REPO = "repolex-ai/forx"
 MAX_CONCURRENT = 20
 POLL_INTERVAL = 120  # seconds between manifest checks (no API rate limit concern)
-STALE_TIMEOUT = 1800  # 30 min - if no manifest update, mark as failed
+STALE_TIMEOUT = 18000  # 5 hours - big repos like pixeltable can take a long time
 
 
 def gh_run(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
