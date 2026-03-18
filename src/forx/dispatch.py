@@ -3,12 +3,15 @@
 import json
 import subprocess
 import time
+import urllib.request
+import urllib.error
 
 
 WORKFLOW_FILE = "parse.yml"
 WORKFLOW_REPO = "repolex-ai/forx"
 MAX_CONCURRENT = 20
-POLL_INTERVAL = 300  # seconds (5 min - conserve API rate limit)
+POLL_INTERVAL = 120  # seconds between manifest checks (no API rate limit concern)
+STALE_TIMEOUT = 1800  # 30 min - if no manifest update, mark as failed
 
 
 def gh_run(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
@@ -29,7 +32,6 @@ def dispatch_workflow(repo: str, tag: str, storage_repo: str) -> str:
     Dispatch a parse workflow run.
     Returns the workflow run ID.
     """
-    # Dispatch the workflow
     gh_run([
         "workflow", "run", WORKFLOW_FILE,
         "--repo", WORKFLOW_REPO,
@@ -39,10 +41,8 @@ def dispatch_workflow(repo: str, tag: str, storage_repo: str) -> str:
     ])
 
     # gh workflow run doesn't return the run ID, so we need to find it
-    # Wait a moment for GitHub to register the run
     time.sleep(2)
 
-    # Get the most recent run for this workflow
     result = gh_run([
         "run", "list",
         "--repo", WORKFLOW_REPO,
@@ -58,58 +58,42 @@ def dispatch_workflow(repo: str, tag: str, storage_repo: str) -> str:
     raise RuntimeError(f"Could not find workflow run after dispatch for {repo}@{tag}")
 
 
-def get_run_status(run_id: str) -> dict:
-    """Get the status of a workflow run."""
-    result = gh_run([
-        "run", "view", run_id,
-        "--repo", WORKFLOW_REPO,
-        "--json", "status,conclusion,databaseId",
-    ])
-    return json.loads(result.stdout)
-
-
-def get_active_runs() -> list[dict]:
-    """Get all currently active (queued/in_progress) runs."""
-    result = gh_run([
-        "run", "list",
-        "--repo", WORKFLOW_REPO,
-        "--workflow", WORKFLOW_FILE,
-        "--status", "in_progress",
-        "--json", "databaseId,status,createdAt",
-        "--limit", "50",
-    ])
-    in_progress = json.loads(result.stdout)
-
-    result = gh_run([
-        "run", "list",
-        "--repo", WORKFLOW_REPO,
-        "--workflow", WORKFLOW_FILE,
-        "--status", "queued",
-        "--json", "databaseId,status,createdAt",
-        "--limit", "50",
-    ])
-    queued = json.loads(result.stdout)
-
-    return in_progress + queued
-
-
-def check_completed_runs(run_ids: list[str]) -> list[tuple[str, str, str]]:
+def fetch_manifest(storage_repo: str) -> dict | None:
     """
-    Check which runs from the given IDs have completed.
-    Returns [(run_id, conclusion, conclusion_detail), ...] for completed runs.
-    conclusion is 'success', 'failure', 'cancelled', etc.
+    Fetch manifest.json from a storage repo via raw HTTP (no API auth needed).
+    Returns parsed JSON or None if not found.
     """
-    completed = []
-    for run_id in run_ids:
-        try:
-            status = get_run_status(run_id)
-            if status["status"] == "completed":
-                conclusion = status.get("conclusion", "unknown")
-                completed.append((run_id, conclusion, ""))
-        except Exception as e:
-            # If we can't check, assume still running
-            completed.append((run_id, "error", str(e)))
-    return completed
+    # storage_repo is like "repolex-forx/TopQuadrant--shacl"
+    url = f"https://raw.githubusercontent.com/{storage_repo}/main/manifest.json"
+    try:
+        req = urllib.request.Request(url)
+        # Bust GitHub's CDN cache
+        req.add_header("Cache-Control", "no-cache")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError:
+        return None
+    except Exception:
+        return None
+
+
+def check_manifest_for_tag(storage_repo: str, git_tag: str, dispatched_at: str) -> str | None:
+    """
+    Check if a tag has been parsed by looking at the manifest.
+    Returns 'success' if the tag appears in the manifest with a parsed_at
+    timestamp after dispatched_at. Returns None if not yet done.
+    """
+    manifest = fetch_manifest(storage_repo)
+    if manifest is None:
+        return None
+
+    for version in manifest.get("versions", []):
+        if version.get("tag") == git_tag:
+            parsed_at = version.get("parsed_at", "")
+            if parsed_at >= dispatched_at:
+                return "success"
+
+    return None
 
 
 def get_run_logs(run_id: str) -> str:

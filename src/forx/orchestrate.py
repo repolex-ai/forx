@@ -1,6 +1,7 @@
 """Main orchestration loop: keep ~20 parse jobs running at all times."""
 
 import time
+from datetime import datetime, timezone
 
 from rich.console import Console
 from rich.table import Table
@@ -12,14 +13,12 @@ console = Console()
 
 def fill_slots(conn, max_concurrent: int = dispatch.MAX_CONCURRENT):
     """Dispatch jobs to fill available slots."""
-    # How many are currently running?
     active = db.get_dispatched_tags(conn)
     available = max_concurrent - len(active)
 
     if available <= 0:
         return 0
 
-    # Get next batch of pending tags
     pending = db.get_pending_tags(conn, limit=available)
 
     if not pending:
@@ -48,40 +47,44 @@ def fill_slots(conn, max_concurrent: int = dispatch.MAX_CONCURRENT):
 
 
 def check_running(conn) -> tuple[int, int]:
-    """Check status of all dispatched jobs. Returns (completed, failed)."""
+    """
+    Check status of dispatched jobs by fetching manifests via HTTP.
+    No GitHub API calls - just raw file fetches from public repos.
+    Returns (completed, failed).
+    """
     active = db.get_dispatched_tags(conn)
     if not active:
         return 0, 0
 
-    run_ids = [row["workflow_run_id"] for row in active]
-    run_id_to_tag = {row["workflow_run_id"]: row for row in active}
-
     completed_count = 0
     failed_count = 0
+    now = datetime.now(timezone.utc)
 
-    results = dispatch.check_completed_runs(run_ids)
-    for run_id, conclusion, detail in results:
-        tag_row = run_id_to_tag[run_id]
-        if conclusion == "success":
+    for tag_row in active:
+        storage_repo = tag_row["storage_repo"]
+        git_tag = tag_row["git_tag"]
+        dispatched_at = tag_row["dispatched_at"]
+
+        # Check manifest for this tag
+        result = dispatch.check_manifest_for_tag(storage_repo, git_tag, dispatched_at)
+
+        if result == "success":
             db.mark_complete(conn, tag_row["id"])
             console.print(
-                f"  [green]✓[/] {tag_row['full_name']}@{tag_row['git_tag']}"
+                f"  [green]✓[/] {tag_row['full_name']}@{git_tag}"
             )
             completed_count += 1
-        elif conclusion in ("failure", "error", "cancelled"):
-            error_msg = detail or conclusion
-            if conclusion == "failure":
-                try:
-                    logs = dispatch.get_run_logs(run_id)
-                    if logs:
-                        error_msg = logs[-500:]
-                except Exception:
-                    pass
-            db.mark_failed(conn, tag_row["id"], error_msg)
-            console.print(
-                f"  [red]✗[/] {tag_row['full_name']}@{tag_row['git_tag']} ({conclusion})"
-            )
-            failed_count += 1
+        else:
+            # Check if it's been too long (stale)
+            if dispatched_at:
+                dispatched_time = datetime.fromisoformat(dispatched_at)
+                elapsed = (now - dispatched_time).total_seconds()
+                if elapsed > dispatch.STALE_TIMEOUT:
+                    db.mark_failed(conn, tag_row["id"], f"No manifest update after {int(elapsed)}s")
+                    console.print(
+                        f"  [red]✗[/] {tag_row['full_name']}@{git_tag} (timeout)"
+                    )
+                    failed_count += 1
 
     return completed_count, failed_count
 
@@ -107,7 +110,7 @@ def print_status(conn):
 def run_loop(conn, max_concurrent: int = dispatch.MAX_CONCURRENT, poll_interval: int = dispatch.POLL_INTERVAL):
     """
     Main orchestration loop.
-    Keeps slots filled and monitors until everything is done.
+    Keeps slots filled and monitors via manifest checks (no API polling).
     """
     console.print("[bold]Starting forx orchestrator[/]")
     print_status(conn)
@@ -118,7 +121,7 @@ def run_loop(conn, max_concurrent: int = dispatch.MAX_CONCURRENT, poll_interval:
         console.print(f"[yellow]Reset {reset_count} stale dispatched jobs[/]")
 
     while True:
-        # Check completed runs
+        # Check completed runs via manifest
         completed, failed = check_running(conn)
         if completed or failed:
             console.print(f"  [dim]Batch: {completed} complete, {failed} failed[/]")
