@@ -8,7 +8,7 @@ import time
 WORKFLOW_FILE = "parse.yml"
 WORKFLOW_REPO = "repolex-ai/forx"
 MAX_CONCURRENT = 20
-POLL_INTERVAL = 15  # seconds
+POLL_INTERVAL = 300  # seconds (5 min - conserve API rate limit)
 
 
 def gh_run(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
