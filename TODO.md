@@ -23,7 +23,26 @@
 - `forx parse org/repo` to force immediate re-parse
 
 ## Manifest file (parser-side)
-- Parser produces manifest.json in storage repo root
-- Accumulates across parses (append new commits)
-- Lists all files produced, dependencies with resolved GitHub repos
+- Parser produces manifest.json in storage repo root ✅
+- Accumulates across parses (append new commits) ✅
+- Lists all files produced, dependencies with resolved GitHub repos ✅
 - Foundation for index site and lexq download
+
+## Parser version tracking
+- Parser writes its version to manifest.json (e.g., `parser_version: "0.3.0"`)
+- forx can compare manifest parser_version vs current parser version
+- Auto-requeue repos parsed with old parser versions
+- Enables automated re-parsing when parser improves (new ontology, better LSP, etc.)
+
+## Dependency spider
+- Read dependencies from manifest.json in storage repos
+- Auto-add dependency repos to forx queue
+- `forx spider` command to crawl all parsed repos and queue their deps
+- Recursive: parsed deps reveal their own deps
+- Track dependency edges in forx DB for the index site
+
+## Large repo handling
+- pixeltable and sqlalchemy hit 6-hour GitHub Actions timeout on aggregate
+- Streaming AST aggregation helps but may not be enough for very large repos
+- Consider: chunked aggregate output, skip aggregate for repos over N blobs
+- Parser-side: investigate memory usage during LSP enrichment on large codebases
