@@ -41,6 +41,14 @@
 - Recursive: parsed deps reveal their own deps
 - Track dependency edges in forx DB for the index site
 
+## Dev org for testing (repolex-forx-dev)
+- `repolex-forx` = production, uses pinned parser releases
+- `repolex-forx-dev` = testing, pulls parser from HEAD
+- `forx add --dev` / `forx run --dev` switches target org
+- Workflow needs two install paths: release tag vs HEAD
+- Test parser changes on a few repos in dev before promoting
+- Broken parser commits never touch production data
+
 ## Large repo handling
 - pixeltable and sqlalchemy hit 6-hour GitHub Actions timeout on aggregate
 - Streaming AST aggregation helps but may not be enough for very large repos
