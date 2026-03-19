@@ -70,6 +70,16 @@ jobs:
           uv tool install "git+https://x-access-token:${GH_TOKEN}@github.com/repolex-ai/repolex-parser-py.git"
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
+      - name: Cache LSP servers
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/uv/tools/repolex/lib/python*/site-packages/multilspy/language_servers/*/static
+            ~/.multilspy
+          key: lsp-servers-${{ runner.os }}
+          restore-keys: |
+            lsp-servers-
+
       - name: Parse repository
         env:
           REPOLEX_STORAGE_DIR: ${{ github.workspace }}/storage
