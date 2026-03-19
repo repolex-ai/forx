@@ -4,7 +4,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from . import db, discover, dispatch, orchestrate
+from . import db, discover, dispatch, orchestrate, spider
 
 console = Console()
 
@@ -235,3 +235,15 @@ def list_repos(ctx):
                 "failed": "✗",
             }.get(tag["status"], "?")
             console.print(f"  [{status_style}]{marker} {tag['git_tag']}[/]")
+
+
+@cli.command()
+@click.pass_context
+def crawl(ctx):
+    """Spider all parsed repos and queue their dependencies.
+
+    Fetches manifest.json from each storage repo, finds resolved
+    dependencies, and adds new repos to the parse queue.
+    """
+    conn = ctx.obj["conn"]
+    spider.spider_all(conn)
