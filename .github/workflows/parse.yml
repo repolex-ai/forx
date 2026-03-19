@@ -45,18 +45,6 @@ jobs:
             git push -u origin main
           fi
 
-          # If repo was previously flattened, restore files/ structure
-          # so the parser can find existing blobs
-          ORG=$(echo "${{ inputs.repo }}" | cut -d/ -f1)
-          REPO=$(echo "${{ inputs.repo }}" | cut -d/ -f2)
-          if [ -d "blob" ] && [ ! -d "files/${ORG}/${REPO}" ]; then
-            mkdir -p "files/${ORG}/${REPO}"
-            for dir in aggregate blob branch commit filetree tag issue pr dep; do
-              [ -d "$dir" ] && mv "$dir" "files/${ORG}/${REPO}/"
-            done
-            [ -f "manifest.json" ] && mv manifest.json "files/${ORG}/${REPO}/"
-          fi
-
       - name: Clone and checkout source
         run: |
           git clone https://github.com/${{ inputs.repo }}.git /tmp/source
@@ -84,7 +72,7 @@ jobs:
 
       - name: Parse repository
         env:
-          REPOLEX_HOME: ${{ github.workspace }}/storage
+          REPOLEX_STORAGE_DIR: ${{ github.workspace }}/storage
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
           cd /tmp/source
@@ -103,7 +91,7 @@ jobs:
 
       - name: Aggregate repository
         env:
-          REPOLEX_HOME: ${{ github.workspace }}/storage
+          REPOLEX_STORAGE_DIR: ${{ github.workspace }}/storage
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
           cd /tmp/source
@@ -119,17 +107,6 @@ jobs:
           git diff --staged --quiet && echo "No aggregate changes to commit" && exit 0
           git commit -m "Aggregate ${{ inputs.repo }}@${{ inputs.tag }} (${{ env.COMMIT_SHA }})"
           git push
-
-      - name: Flatten storage structure
-        run: |
-          cd ${{ github.workspace }}/storage
-          ORG=$(echo "${{ inputs.repo }}" | cut -d/ -f1)
-          REPO=$(echo "${{ inputs.repo }}" | cut -d/ -f2)
-
-          if [ -d "files/${ORG}/${REPO}" ]; then
-            cp -a "files/${ORG}/${REPO}/." .
-            rm -rf files/
-          fi
 
       - name: Generate README
         run: |
@@ -218,13 +195,13 @@ jobs:
 
           sed -i "s/PARSE_DATE_PLACEHOLDER/${PARSE_DATE}/" README.md
 
-      - name: Commit flatten and README
+      - name: Commit README
         env:
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
           cd ${{ github.workspace }}/storage
           git pull --rebase origin main || true
-          git add .
-          git diff --staged --quiet && echo "No changes" && exit 0
-          git commit -m "Flatten and update README for ${{ inputs.repo }}@${{ inputs.tag }}"
+          git add README.md
+          git diff --staged --quiet && echo "No README changes" && exit 0
+          git commit -m "Update README for ${{ inputs.repo }}@${{ inputs.tag }}"
           git push
