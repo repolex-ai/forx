@@ -268,6 +268,14 @@ jobs:
         if: steps.lsp-cache.outputs.cache-hit != 'true'
         run: |
           echo "Cache miss - warming all LSP servers..."
+
+          # Install Go LSP server
+          go install golang.org/x/tools/gopls@latest 2>/dev/null || echo "gopls install failed"
+
+          # Install Ruby LSP server (user-level to avoid permission issues)
+          gem install --user-install solargraph 2>/dev/null || echo "solargraph install failed"
+          export PATH="$HOME/.local/share/gem/ruby/3.2.0/bin:$PATH"
+
           REPOLEX_VENV="$HOME/.local/share/uv/tools/repolex"
           $REPOLEX_VENV/bin/python << 'PYEOF'
           import time, tempfile
