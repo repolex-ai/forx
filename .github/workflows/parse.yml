@@ -15,7 +15,12 @@ on:
 
 jobs:
   parse:
+    name: "Parse ${{ inputs.repo }}@${{ inputs.tag }}"
     runs-on: ubuntu-latest
+    outputs:
+      blobs_complete: ${{ steps.parse.outputs.blobs_complete }}
+      commit_sha: ${{ steps.checkout-source.outputs.commit_sha }}
+
     steps:
       - name: Setup storage repo
         env:
@@ -46,12 +51,15 @@ jobs:
           fi
 
       - name: Clone and checkout source
+        id: checkout-source
         run: |
           git clone https://github.com/${{ inputs.repo }}.git /tmp/source
           cd /tmp/source
           git fetch --tags
           git checkout ${{ inputs.tag }}
-          echo "COMMIT_SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
+          COMMIT_SHA=$(git rev-parse HEAD)
+          echo "COMMIT_SHA=$COMMIT_SHA" >> $GITHUB_ENV
+          echo "commit_sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -67,123 +75,43 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
-          uv tool install "git+https://x-access-token:${GH_TOKEN}@github.com/repolex-ai/repolex-parser-py.git"
+          uv tool install "git+https://x-access-token:${GH_TOKEN}@github.com/repolex-ai/repolex-parser-py.git@v0.0.1"
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      - name: Cache LSP servers
-        id: lsp-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.local/share/uv/tools/repolex/lib/python3.12/site-packages/multilspy/language_servers
-            ~/.local/share/uv/tools/repolex/lib/python3.13/site-packages/multilspy/language_servers
-            ~/.multilspy
-          key: lsp-servers-${{ runner.os }}-v3
-          restore-keys: |
-            lsp-servers-${{ runner.os }}-
-
-      - name: Warm LSP servers
-        if: steps.lsp-cache.outputs.cache-hit != 'true'
-        run: |
-          echo "Cache miss - warming all LSP servers..."
-          PYTHON_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-          LSP_DIR="$HOME/.local/share/uv/tools/repolex/lib/python${PYTHON_VER}/site-packages/multilspy/language_servers"
-
-          echo "=== LSP server directory: $LSP_DIR ==="
-          ls -la "$LSP_DIR/" 2>/dev/null || echo "Directory not found"
-
-          # Warm each language server by creating a minimal LanguageServer instance
-          # This triggers the download of runtime dependencies
-          python3 << 'PYEOF'
-          import os, sys, time, tempfile
-          from pathlib import Path
-
-          # Add the uv tool path
-          python_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
-          site_packages = Path.home() / f".local/share/uv/tools/repolex/lib/python{python_ver}/site-packages"
-          sys.path.insert(0, str(site_packages))
-
-          from multilspy.multilspy_config import MultilspyConfig, Language
-          from multilspy.multilspy_logger import MultilspyLogger
-          from multilspy.language_server import LanguageServer
-
-          languages = [
-              ("Python", Language.PYTHON),
-              ("Java", Language.JAVA),
-              ("TypeScript", Language.TYPESCRIPT),
-              ("JavaScript", Language.JAVASCRIPT),
-              ("Rust", Language.RUST),
-              ("Go", Language.GO),
-              ("Ruby", Language.RUBY),
-              ("C#", Language.CSHARP),
-              ("Kotlin", Language.KOTLIN),
-              ("Dart", Language.DART),
-              ("C++", Language.CPP),
-          ]
-
-          logger = MultilspyLogger()
-
-          for name, lang in languages:
-              start = time.time()
-              print(f"\n{'='*60}")
-              print(f"Warming {name} LSP server...")
-              print(f"{'='*60}")
-              try:
-                  with tempfile.TemporaryDirectory() as tmpdir:
-                      # Create a dummy file so the server has something to work with
-                      dummy = Path(tmpdir) / "dummy.txt"
-                      dummy.write_text("// dummy\n")
-
-                      config = MultilspyConfig.from_dict({"code_language": lang})
-                      lsp = LanguageServer.create(config, logger, str(tmpdir))
-                      elapsed = time.time() - start
-                      print(f"  OK - {name} ready ({elapsed:.1f}s)")
-              except Exception as e:
-                  elapsed = time.time() - start
-                  print(f"  WARN - {name} failed ({elapsed:.1f}s): {e}")
-
-          print(f"\n{'='*60}")
-          print("LSP warm-up complete!")
-          print(f"{'='*60}")
-          PYEOF
-
-      - name: Parse repository
+      - name: Parse blobs (batched)
+        id: parse
         env:
           REPOLEX_STORAGE_DIR: ${{ github.workspace }}/storage
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
           cd /tmp/source
-          repolex parse ${{ inputs.repo }} ${{ inputs.tag }}
+          while true; do
+            set +e
+            repolex parse ${{ inputs.repo }} ${{ inputs.tag }} --gh
+            EXIT_CODE=$?
+            set -e
 
-      - name: Commit parse results
-        env:
-          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
-        run: |
-          cd ${{ github.workspace }}/storage
-          git add .
-          git diff --staged --quiet && echo "No changes to commit" && exit 0
-          git pull --rebase origin main || true
-          git commit -m "Parse ${{ inputs.repo }}@${{ inputs.tag }} (${{ env.COMMIT_SHA }})"
-          git push
+            # Commit progress
+            cd ${{ github.workspace }}/storage
+            git add .
+            if ! git diff --staged --quiet; then
+              git pull --rebase origin main || true
+              git commit -m "Parse ${{ inputs.repo }}@${{ inputs.tag }} batch (${{ env.COMMIT_SHA }})"
+              git push
+            fi
+            cd /tmp/source
 
-      - name: Aggregate repository
-        env:
-          REPOLEX_STORAGE_DIR: ${{ github.workspace }}/storage
-          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
-        run: |
-          cd /tmp/source
-          repolex aggregate ${{ inputs.repo }} ${{ inputs.tag }}
-
-      - name: Commit aggregate results
-        env:
-          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
-        run: |
-          cd ${{ github.workspace }}/storage
-          git add .
-          git diff --staged --quiet && echo "No aggregate changes to commit" && exit 0
-          git pull --rebase origin main || true
-          git commit -m "Aggregate ${{ inputs.repo }}@${{ inputs.tag }} (${{ env.COMMIT_SHA }})"
-          git push
+            if [ $EXIT_CODE -eq 0 ]; then
+              echo "blobs_complete=true" >> $GITHUB_OUTPUT
+              echo "Blob parsing complete"
+              break
+            elif [ $EXIT_CODE -eq 7 ]; then
+              echo "Batch committed, continuing..."
+            else
+              echo "Parse failed with exit code $EXIT_CODE"
+              exit $EXIT_CODE
+            fi
+          done
 
       - name: Generate README
         run: |
@@ -281,4 +209,124 @@ jobs:
           git diff --staged --quiet && echo "No README changes" && exit 0
           git pull --rebase origin main || true
           git commit -m "Update README for ${{ inputs.repo }}@${{ inputs.tag }}"
+          git push
+
+  enrich:
+    name: "Enrich ${{ inputs.repo }}@${{ inputs.tag }}"
+    needs: parse
+    if: needs.parse.outputs.blobs_complete == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout storage repo
+        env:
+          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
+        run: |
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ inputs.storage_repo }}.git" storage
+          cd storage
+          git config user.name "repolex-bot"
+          git config user.email "bot@repolex.ai"
+
+      - name: Clone and checkout source
+        run: |
+          git clone https://github.com/${{ inputs.repo }}.git /tmp/source
+          cd /tmp/source
+          git fetch --tags
+          git checkout ${{ inputs.tag }}
+          echo "COMMIT_SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install repolex
+        env:
+          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
+        run: |
+          uv tool install "git+https://x-access-token:${GH_TOKEN}@github.com/repolex-ai/repolex-parser-py.git"
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Cache LSP servers
+        id: lsp-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/uv/tools/repolex/lib/python3.12/site-packages/multilspy/language_servers
+            ~/.local/share/uv/tools/repolex/lib/python3.13/site-packages/multilspy/language_servers
+            ~/.multilspy
+          key: lsp-servers-${{ runner.os }}-v3
+          restore-keys: |
+            lsp-servers-${{ runner.os }}-
+
+      - name: Warm LSP servers
+        if: steps.lsp-cache.outputs.cache-hit != 'true'
+        run: |
+          echo "Cache miss - warming all LSP servers..."
+          python3 << 'PYEOF'
+          import os, sys, time, tempfile
+          from pathlib import Path
+
+          python_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+          site_packages = Path.home() / f".local/share/uv/tools/repolex/lib/python{python_ver}/site-packages"
+          sys.path.insert(0, str(site_packages))
+
+          from multilspy.multilspy_config import MultilspyConfig, Language
+          from multilspy.multilspy_logger import MultilspyLogger
+          from multilspy.language_server import LanguageServer
+
+          languages = [
+              ("Python", Language.PYTHON),
+              ("Java", Language.JAVA),
+              ("TypeScript", Language.TYPESCRIPT),
+              ("JavaScript", Language.JAVASCRIPT),
+              ("Rust", Language.RUST),
+              ("Go", Language.GO),
+              ("Ruby", Language.RUBY),
+              ("C#", Language.CSHARP),
+              ("Kotlin", Language.KOTLIN),
+              ("Dart", Language.DART),
+              ("C++", Language.CPP),
+          ]
+
+          logger = MultilspyLogger()
+
+          for name, lang in languages:
+              start = time.time()
+              print(f"Warming {name}...", end=" ", flush=True)
+              try:
+                  with tempfile.TemporaryDirectory() as tmpdir:
+                      dummy = Path(tmpdir) / "dummy.txt"
+                      dummy.write_text("// dummy\n")
+                      config = MultilspyConfig.from_dict({"code_language": lang})
+                      lsp = LanguageServer.create(config, logger, str(tmpdir))
+                      print(f"OK ({time.time() - start:.1f}s)")
+              except Exception as e:
+                  print(f"WARN ({time.time() - start:.1f}s): {e}")
+
+          print("\nLSP warm-up complete!")
+          PYEOF
+
+      - name: Aggregate and enrich
+        env:
+          REPOLEX_STORAGE_DIR: ${{ github.workspace }}/storage
+          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
+        run: |
+          cd /tmp/source
+          repolex aggregate ${{ inputs.repo }} ${{ inputs.tag }}
+
+      - name: Commit enrichment results
+        env:
+          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
+        run: |
+          cd ${{ github.workspace }}/storage
+          git add .
+          git diff --staged --quiet && echo "No enrichment changes to commit" && exit 0
+          git pull --rebase origin main || true
+          git commit -m "Enrich ${{ inputs.repo }}@${{ inputs.tag }} (${{ env.COMMIT_SHA }})"
           git push
