@@ -74,11 +74,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/.local/share/uv/tools/repolex/lib/python*/site-packages/multilspy/language_servers/*/static
+            ~/.local/share/uv/tools/repolex/lib/python3.12/site-packages/multilspy/language_servers
+            ~/.local/share/uv/tools/repolex/lib/python3.13/site-packages/multilspy/language_servers
             ~/.multilspy
-          key: lsp-servers-${{ runner.os }}
+          key: lsp-servers-${{ runner.os }}-v2
           restore-keys: |
-            lsp-servers-
+            lsp-servers-${{ runner.os }}-
 
       - name: Parse repository
         env:
