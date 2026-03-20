@@ -80,6 +80,12 @@ jobs:
           uv tool install "git+https://x-access-token:${GH_TOKEN}@github.com/repolex-ai/repolex-parser-py.git@v0.0.2"
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
+      - name: Configure git auth
+        env:
+          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
+        run: |
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+
       - name: Parse blobs (batched)
         id: parse
         env:
