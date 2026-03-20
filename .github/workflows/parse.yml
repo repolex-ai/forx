@@ -268,13 +268,10 @@ jobs:
         if: steps.lsp-cache.outputs.cache-hit != 'true'
         run: |
           echo "Cache miss - warming all LSP servers..."
-          python3 << 'PYEOF'
-          import os, sys, time, tempfile
+          REPOLEX_VENV="$HOME/.local/share/uv/tools/repolex"
+          $REPOLEX_VENV/bin/python << 'PYEOF'
+          import time, tempfile
           from pathlib import Path
-
-          python_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
-          site_packages = Path.home() / f".local/share/uv/tools/repolex/lib/python{python_ver}/site-packages"
-          sys.path.insert(0, str(site_packages))
 
           from multilspy.multilspy_config import MultilspyConfig, Language
           from multilspy.multilspy_logger import MultilspyLogger
