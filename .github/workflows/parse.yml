@@ -71,15 +71,81 @@ jobs:
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Cache LSP servers
+        id: lsp-cache
         uses: actions/cache@v4
         with:
           path: |
             ~/.local/share/uv/tools/repolex/lib/python3.12/site-packages/multilspy/language_servers
             ~/.local/share/uv/tools/repolex/lib/python3.13/site-packages/multilspy/language_servers
             ~/.multilspy
-          key: lsp-servers-${{ runner.os }}-v2
+          key: lsp-servers-${{ runner.os }}-v3
           restore-keys: |
             lsp-servers-${{ runner.os }}-
+
+      - name: Warm LSP servers
+        if: steps.lsp-cache.outputs.cache-hit != 'true'
+        run: |
+          echo "Cache miss - warming all LSP servers..."
+          PYTHON_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+          LSP_DIR="$HOME/.local/share/uv/tools/repolex/lib/python${PYTHON_VER}/site-packages/multilspy/language_servers"
+
+          echo "=== LSP server directory: $LSP_DIR ==="
+          ls -la "$LSP_DIR/" 2>/dev/null || echo "Directory not found"
+
+          # Warm each language server by creating a minimal LanguageServer instance
+          # This triggers the download of runtime dependencies
+          python3 << 'PYEOF'
+          import os, sys, time, tempfile
+          from pathlib import Path
+
+          # Add the uv tool path
+          python_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+          site_packages = Path.home() / f".local/share/uv/tools/repolex/lib/python{python_ver}/site-packages"
+          sys.path.insert(0, str(site_packages))
+
+          from multilspy.multilspy_config import MultilspyConfig, Language
+          from multilspy.multilspy_logger import MultilspyLogger
+          from multilspy.language_server import LanguageServer
+
+          languages = [
+              ("Python", Language.PYTHON),
+              ("Java", Language.JAVA),
+              ("TypeScript", Language.TYPESCRIPT),
+              ("JavaScript", Language.JAVASCRIPT),
+              ("Rust", Language.RUST),
+              ("Go", Language.GO),
+              ("Ruby", Language.RUBY),
+              ("C#", Language.CSHARP),
+              ("Kotlin", Language.KOTLIN),
+              ("Dart", Language.DART),
+              ("C++", Language.CPP),
+          ]
+
+          logger = MultilspyLogger()
+
+          for name, lang in languages:
+              start = time.time()
+              print(f"\n{'='*60}")
+              print(f"Warming {name} LSP server...")
+              print(f"{'='*60}")
+              try:
+                  with tempfile.TemporaryDirectory() as tmpdir:
+                      # Create a dummy file so the server has something to work with
+                      dummy = Path(tmpdir) / "dummy.txt"
+                      dummy.write_text("// dummy\n")
+
+                      config = MultilspyConfig.from_dict({"code_language": lang})
+                      lsp = LanguageServer.create(config, logger, str(tmpdir))
+                      elapsed = time.time() - start
+                      print(f"  OK - {name} ready ({elapsed:.1f}s)")
+              except Exception as e:
+                  elapsed = time.time() - start
+                  print(f"  WARN - {name} failed ({elapsed:.1f}s): {e}")
+
+          print(f"\n{'='*60}")
+          print("LSP warm-up complete!")
+          print(f"{'='*60}")
+          PYEOF
 
       - name: Parse repository
         env:
