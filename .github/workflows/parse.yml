@@ -226,6 +226,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Configure git auth
+        env:
+          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
+        run: |
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+
       - name: Checkout storage repo
         env:
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
