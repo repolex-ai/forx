@@ -349,6 +349,9 @@ jobs:
           cd ${{ github.workspace }}/storage
           git add .
           git diff --staged --quiet && echo "No enrichment changes to commit" && exit 0
+          git stash
           git pull --rebase origin main || true
+          git stash pop || true
+          git add .
           git commit -m "Enrich ${{ inputs.repo }}@${{ inputs.tag }} (${{ env.COMMIT_SHA }})"
           git push
