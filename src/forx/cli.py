@@ -238,6 +238,48 @@ def list_repos(ctx):
 
 
 @cli.command()
+@click.option("--dry-run", is_flag=True, help="Show what would be reset without doing it")
+@click.pass_context
+def reparse(ctx, dry_run):
+    """Invalidate tags parsed with an older parser version.
+
+    Resets completed tags back to pending if they were parsed with
+    a different version than the current one. Use after upgrading
+    the repolex parser.
+
+    Examples:
+        forx reparse
+        forx reparse --dry-run
+    """
+    conn = ctx.obj["conn"]
+
+    if dry_run:
+        rows = conn.execute(
+            """SELECT r.full_name, t.git_tag, t.parser_version
+               FROM tags t JOIN repos r ON t.repo_id = r.id
+               WHERE t.status = 'complete'
+                 AND (t.parser_version IS NULL OR t.parser_version != ?)
+               ORDER BY r.full_name, t.id""",
+            (db.PARSER_VERSION,),
+        ).fetchall()
+        if rows:
+            console.print(f"[yellow]Would reset {len(rows)} tags (current version: {db.PARSER_VERSION}):[/]")
+            for row in rows[:20]:
+                old_ver = row["parser_version"] or "unknown"
+                console.print(f"  {row['full_name']}@{row['git_tag']} (was: {old_ver})")
+            if len(rows) > 20:
+                console.print(f"  ... and {len(rows) - 20} more")
+        else:
+            console.print(f"[green]All completed tags are on current version ({db.PARSER_VERSION})[/]")
+    else:
+        count = db.invalidate_old_parses(conn)
+        if count:
+            console.print(f"[green]Reset {count} tags to pending (current version: {db.PARSER_VERSION})[/]")
+        else:
+            console.print(f"[green]All completed tags are on current version ({db.PARSER_VERSION})[/]")
+
+
+@cli.command()
 @click.pass_context
 def crawl(ctx):
     """Spider all parsed repos and queue their dependencies.

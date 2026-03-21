@@ -6,6 +6,12 @@ from pathlib import Path
 
 DEFAULT_DB_PATH = Path.home() / ".forx" / "forx.db"
 
+# The parser version used by the current workflow.
+# Bump this when repolex-parser-py gets a new release that
+# changes output format. Tags parsed with an older version
+# can be invalidated with `forx reparse`.
+PARSER_VERSION = "v0.0.2"
+
 MIGRATIONS = [
     # v1: initial schema
     """
@@ -64,6 +70,12 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
     else:
         # Old schema with 'version' column - migrate
         _migrate_v0_to_v1(conn)
+
+    # Add parser_version column if missing
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tags)").fetchall()}
+    if "parser_version" not in cols:
+        conn.execute("ALTER TABLE tags ADD COLUMN parser_version TEXT")
+        conn.commit()
 
     return conn
 
@@ -179,10 +191,10 @@ def mark_dispatched(conn: sqlite3.Connection, tag_id: int, run_id: str):
 
 
 def mark_complete(conn: sqlite3.Connection, tag_id: int, commit_sha: str | None = None):
-    """Mark a tag as successfully parsed."""
+    """Mark a tag as successfully parsed with the current parser version."""
     conn.execute(
-        "UPDATE tags SET status = 'complete', completed_at = ?, commit_sha = COALESCE(?, commit_sha) WHERE id = ?",
-        (now(), commit_sha, tag_id),
+        "UPDATE tags SET status = 'complete', completed_at = ?, commit_sha = COALESCE(?, commit_sha), parser_version = ? WHERE id = ?",
+        (now(), commit_sha, PARSER_VERSION, tag_id),
     )
     conn.commit()
 
@@ -216,6 +228,20 @@ def get_head_repos_needing_parse(conn: sqlite3.Connection, cooldown_days: int = 
            ORDER BY last_head_parsed NULLS FIRST""",
         (cooldown_days,),
     ).fetchall()
+
+
+def invalidate_old_parses(conn: sqlite3.Connection) -> int:
+    """Reset completed tags that were parsed with an older parser version."""
+    rows = conn.execute(
+        """UPDATE tags SET status = 'pending', workflow_run_id = NULL,
+                          dispatched_at = NULL, completed_at = NULL, error = NULL
+           WHERE status = 'complete'
+             AND (parser_version IS NULL OR parser_version != ?)
+           RETURNING id""",
+        (PARSER_VERSION,),
+    ).fetchall()
+    conn.commit()
+    return len(rows)
 
 
 def reset_stale_dispatched(conn: sqlite3.Connection, minutes: int = 60):
