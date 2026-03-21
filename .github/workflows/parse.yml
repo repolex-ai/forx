@@ -27,8 +27,10 @@ jobs:
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
           if ! gh repo view ${{ inputs.storage_repo }} &>/dev/null; then
+            # Mirror source repo visibility
+            VISIBILITY=$(gh repo view ${{ inputs.repo }} --json isPrivate --jq 'if .isPrivate then "--private" else "--public" end' 2>/dev/null || echo "--public")
             gh repo create ${{ inputs.storage_repo }} \
-              --public \
+              $VISIBILITY \
               --description "RDF parse data for ${{ inputs.repo }}" \
               --homepage "https://github.com/${{ inputs.repo }}"
           fi
