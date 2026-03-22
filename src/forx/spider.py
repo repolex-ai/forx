@@ -11,9 +11,8 @@ from . import db, discover
 console = Console()
 
 
-def fetch_manifest(storage_repo: str) -> dict | None:
-    """Fetch manifest.json from a storage repo via raw HTTP."""
-    url = f"https://raw.githubusercontent.com/{storage_repo}/main/manifest.json"
+def _fetch_json(url: str) -> dict | None:
+    """Fetch JSON from a URL."""
     try:
         req = urllib.request.Request(url)
         req.add_header("Cache-Control", "no-cache")
@@ -21,6 +20,24 @@ def fetch_manifest(storage_repo: str) -> dict | None:
             return json.loads(resp.read().decode())
     except Exception:
         return None
+
+
+def fetch_manifest(storage_repo: str) -> dict | None:
+    """Fetch manifest from a storage repo. Tries new format first, falls back to legacy."""
+    base = f"https://raw.githubusercontent.com/{storage_repo}/main"
+
+    # Try new format: index.json → latest per-commit manifest
+    index = _fetch_json(f"{base}/index.json")
+    if index and index.get("versions"):
+        latest_commit = index["versions"][0].get("commit", "")
+        if latest_commit:
+            per_commit = _fetch_json(f"{base}/manifests/{latest_commit}.json")
+            if per_commit:
+                # Wrap in legacy format so get_dependencies_from_manifest works
+                return {"versions": [per_commit]}
+
+    # Fall back to legacy manifest.json
+    return _fetch_json(f"{base}/manifest.json")
 
 
 def get_dependencies_from_manifest(manifest: dict) -> list[dict]:

@@ -58,16 +58,14 @@ def dispatch_workflow(repo: str, tag: str, storage_repo: str) -> str:
     raise RuntimeError(f"Could not find workflow run after dispatch for {repo}@{tag}")
 
 
-def fetch_manifest(storage_repo: str) -> dict | None:
+def fetch_json(storage_repo: str, path: str) -> dict | None:
     """
-    Fetch manifest.json from a storage repo via raw HTTP (no API auth needed).
+    Fetch a JSON file from a storage repo via raw HTTP (no API auth needed).
     Returns parsed JSON or None if not found.
     """
-    # storage_repo is like "repolex-forx/TopQuadrant--shacl"
-    url = f"https://raw.githubusercontent.com/{storage_repo}/main/manifest.json"
+    url = f"https://raw.githubusercontent.com/{storage_repo}/main/{path}"
     try:
         req = urllib.request.Request(url)
-        # Bust GitHub's CDN cache
         req.add_header("Cache-Control", "no-cache")
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode())
@@ -79,11 +77,21 @@ def fetch_manifest(storage_repo: str) -> dict | None:
 
 def check_manifest_for_tag(storage_repo: str, git_tag: str, dispatched_at: str) -> str | None:
     """
-    Check if a tag has been parsed by looking at the manifest.
-    Returns 'success' if the tag appears in the manifest with a parsed_at
-    timestamp after dispatched_at. Returns None if not yet done.
+    Check if a tag has been parsed by looking at index.json or manifest.json.
+    Returns 'success' if the tag appears with a parsed_at after dispatched_at.
     """
-    manifest = fetch_manifest(storage_repo)
+    # Try index.json first (new format), fall back to manifest.json (legacy)
+    index = fetch_json(storage_repo, "index.json")
+    if index is not None:
+        for version in index.get("versions", []):
+            if version.get("tag") == git_tag:
+                parsed_at = version.get("parsed_at", "")
+                if parsed_at >= dispatched_at:
+                    return "success"
+        return None
+
+    # Fallback to legacy manifest.json
+    manifest = fetch_json(storage_repo, "manifest.json")
     if manifest is None:
         return None
 

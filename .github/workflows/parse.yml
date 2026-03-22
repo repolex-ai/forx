@@ -210,15 +210,38 @@ jobs:
 
           sed -i "s/PARSE_DATE_PLACEHOLDER/${PARSE_DATE}/" README.md
 
-      - name: Commit README
+      - name: Build index.json and commit README
         env:
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
           cd ${{ github.workspace }}/storage
-          git add README.md
-          git diff --staged --quiet && echo "No README changes" && exit 0
+
+          # Rebuild index.json from manifests/ directory
+          python3 -c "
+          import json, os, glob
+          org_repo = '${{ inputs.repo }}'.split('/')
+          versions = []
+          for path in sorted(glob.glob('manifests/*.json')):
+              with open(path) as f:
+                  m = json.load(f)
+              versions.append({
+                  'commit': m.get('commit', ''),
+                  'tag': m.get('tag', ''),
+                  'parsed_at': m.get('parsed_at', ''),
+              })
+          # Sort by parsed_at descending (latest first)
+          versions.sort(key=lambda v: v.get('parsed_at', ''), reverse=True)
+          index = {'org': org_repo[0], 'repo': org_repo[1], 'versions': versions}
+          with open('index.json', 'w') as f:
+              json.dump(index, f, indent=2)
+              f.write('\n')
+          print(f'Built index.json with {len(versions)} versions')
+          "
+
+          git add README.md index.json
+          git diff --staged --quiet && echo "No changes" && exit 0
           git pull --rebase origin main || true
-          git commit -m "Update README for ${{ inputs.repo }}@${{ inputs.tag }}"
+          git commit -m "Update README and index for ${{ inputs.repo }}@${{ inputs.tag }}"
           git push
 
   enrich:
@@ -356,4 +379,37 @@ jobs:
           git stash pop || true
           git add .
           git commit -m "Enrich ${{ inputs.repo }}@${{ inputs.tag }} (${{ env.COMMIT_SHA }})"
+          git push
+
+      - name: Rebuild index.json
+        env:
+          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
+        run: |
+          cd ${{ github.workspace }}/storage
+
+          # Rebuild index.json from manifests/ directory
+          python3 -c "
+          import json, glob
+          org_repo = '${{ inputs.repo }}'.split('/')
+          versions = []
+          for path in sorted(glob.glob('manifests/*.json')):
+              with open(path) as f:
+                  m = json.load(f)
+              versions.append({
+                  'commit': m.get('commit', ''),
+                  'tag': m.get('tag', ''),
+                  'parsed_at': m.get('parsed_at', ''),
+              })
+          versions.sort(key=lambda v: v.get('parsed_at', ''), reverse=True)
+          index = {'org': org_repo[0], 'repo': org_repo[1], 'versions': versions}
+          with open('index.json', 'w') as f:
+              json.dump(index, f, indent=2)
+              f.write('\n')
+          print(f'Rebuilt index.json with {len(versions)} versions')
+          "
+
+          git add index.json
+          git diff --staged --quiet && echo "No index changes" && exit 0
+          git pull --rebase origin main || true
+          git commit -m "Rebuild index after enrichment for ${{ inputs.repo }}@${{ inputs.tag }}"
           git push
