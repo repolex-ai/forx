@@ -2,7 +2,6 @@
 
 import json
 import urllib.request
-import urllib.error
 
 from rich.console import Console
 
