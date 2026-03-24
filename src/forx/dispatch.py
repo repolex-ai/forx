@@ -77,17 +77,18 @@ def fetch_json(storage_repo: str, path: str) -> dict | None:
 
 def check_manifest_for_tag(storage_repo: str, git_tag: str, dispatched_at: str) -> str | None:
     """
-    Check if a tag has been parsed by looking at index.json or manifest.json.
-    Returns 'success' if the tag appears with a parsed_at after dispatched_at.
+    Check if a tag has been parsed by looking at repo-manifest.jsonld or manifest.json.
+    Returns 'success' if the tag appears as parsed after dispatched_at.
     """
-    # Try index.json first (new format), fall back to manifest.json (legacy)
-    index = fetch_json(storage_repo, "index.json")
-    if index is not None:
-        for version in index.get("versions", []):
-            if version.get("tag") == git_tag:
-                parsed_at = version.get("parsed_at", "")
-                if parsed_at >= dispatched_at:
-                    return "success"
+    # Try repo-manifest.jsonld first (new JSON-LD format)
+    repo_manifest = fetch_json(storage_repo, "repo-manifest.jsonld")
+    if repo_manifest is not None:
+        for commit in repo_manifest.get("repolex:trackedCommit", []):
+            tag_name = commit.get("git:tagName", "")
+            status = commit.get("repolex:parseStatus", "")
+            parsed_at = commit.get("repolex:parsedAt", "")
+            if tag_name == git_tag and status == "parsed" and parsed_at >= dispatched_at:
+                return "success"
         return None
 
     # Fallback to legacy manifest.json

@@ -25,24 +25,39 @@ def fetch_manifest(storage_repo: str) -> dict | None:
     """Fetch manifest from a storage repo. Tries new format first, falls back to legacy."""
     base = f"https://raw.githubusercontent.com/{storage_repo}/main"
 
-    # Try new format: index.json → latest per-commit manifest
-    index = _fetch_json(f"{base}/index.json")
-    if index and index.get("versions"):
-        latest_commit = index["versions"][0].get("commit", "")
-        if latest_commit:
-            per_commit = _fetch_json(f"{base}/manifests/{latest_commit}.json")
-            if per_commit:
-                # Wrap in legacy format so get_dependencies_from_manifest works
-                return {"versions": [per_commit]}
+    # Try new format: repo-manifest.jsonld → latest parsed commit manifest
+    repo_manifest = _fetch_json(f"{base}/repo-manifest.jsonld")
+    if repo_manifest:
+        # Find latest parsed commit
+        for commit in repo_manifest.get("repolex:trackedCommit", []):
+            if commit.get("repolex:parseStatus") == "parsed":
+                sha = commit.get("git:hexsha", "")
+                if sha:
+                    per_commit = _fetch_json(f"{base}/manifests/commit-manifest-{sha}.jsonld")
+                    if per_commit:
+                        return per_commit
+        return None
 
     # Fall back to legacy manifest.json
     return _fetch_json(f"{base}/manifest.json")
 
 
 def get_dependencies_from_manifest(manifest: dict) -> list[dict]:
-    """Extract all unique dependencies across all versions."""
+    """Extract all unique dependencies from a manifest (handles both formats)."""
     seen = set()
     deps = []
+
+    # New JSON-LD format: repolex:dependencyRepo array
+    for dep in manifest.get("repolex:dependencyRepo", []):
+        dep_id = dep.get("@id", "")
+        # Extract org/repo from URI like https://repolex.ai/r/apache/jena
+        if "/r/" in dep_id:
+            full_name = dep_id.split("/r/", 1)[1]
+            if "/" in full_name and full_name not in seen:
+                seen.add(full_name)
+                deps.append({"full_name": full_name, "package": dep.get("repolex:packageName", "")})
+
+    # Legacy format: versions[].dependencies[]
     for version in manifest.get("versions", []):
         for dep in version.get("dependencies", []):
             org = dep.get("githubOrg", "")
@@ -52,6 +67,7 @@ def get_dependencies_from_manifest(manifest: dict) -> list[dict]:
                 if full_name not in seen:
                     seen.add(full_name)
                     deps.append({"full_name": full_name, "package": dep.get("packageName", "")})
+
     return deps
 
 
