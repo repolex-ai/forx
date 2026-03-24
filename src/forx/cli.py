@@ -4,7 +4,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from . import db, discover, dispatch, orchestrate, spider
+from . import db, discover, dispatch, index, orchestrate, spider
 
 console = Console()
 
@@ -277,6 +277,35 @@ def reparse(ctx, dry_run):
             console.print(f"[green]Reset {count} tags to pending (current version: {db.PARSER_VERSION})[/]")
         else:
             console.print(f"[green]All completed tags are on current version ({db.PARSER_VERSION})[/]")
+
+
+@cli.command(name="index")
+@click.option("--push/--no-push", default=True, help="Push changes to forx-index repo")
+@click.pass_context
+def index_cmd(ctx, push):
+    """Sync parsed repo manifests into the forx-index repo.
+
+    Pulls repo-manifest.jsonld and commit manifests from each
+    storage repo and writes them to the local forx-index clone.
+
+    Examples:
+        forx index
+        forx index --no-push
+    """
+    conn = ctx.obj["conn"]
+
+    console.print("[bold]Syncing forx-index...[/]")
+    try:
+        index_path = index.get_index_path()
+    except FileNotFoundError as e:
+        console.print(f"[red]{e}[/]")
+        return
+
+    updated = index.sync_all(conn, index_path)
+    console.print(f"\n[bold]{updated} repos updated[/]")
+
+    if push and updated > 0:
+        index.push_index(index_path, message=f"Sync {updated} repos")
 
 
 @cli.command()
