@@ -301,7 +301,7 @@ jobs:
             ~/.local/share/uv/tools/repolex/lib/python3.12/site-packages/multilspy/language_servers
             ~/.local/share/uv/tools/repolex/lib/python3.13/site-packages/multilspy/language_servers
             ~/.multilspy
-          key: lsp-servers-${{ runner.os }}-v3
+          key: lsp-servers-${{ runner.os }}-v4
           restore-keys: |
             lsp-servers-${{ runner.os }}-
 
@@ -337,6 +337,7 @@ jobs:
               ("C#", Language.CSHARP),
               ("Kotlin", Language.KOTLIN),
               ("Dart", Language.DART),
+              ("Scala", Language.SCALA),
           ]
 
           logger = MultilspyLogger()
