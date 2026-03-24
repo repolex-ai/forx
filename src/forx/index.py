@@ -35,10 +35,10 @@ def sync_repo(full_name: str, storage_repo: str, index_path: Path) -> bool:
     if repo_manifest is None:
         return False
 
-    # Write to index: repos/{org}/{repo}.jsonld
-    repo_dir = index_path / "repos" / org
+    # Write to index: repos/{org}/{repo}/repo-manifest.jsonld
+    repo_dir = index_path / "repos" / org / name
     repo_dir.mkdir(parents=True, exist_ok=True)
-    repo_file = repo_dir / f"{name}.jsonld"
+    repo_file = repo_dir / "repo-manifest.jsonld"
 
     existing = None
     if repo_file.exists():
@@ -55,8 +55,8 @@ def sync_repo(full_name: str, storage_repo: str, index_path: Path) -> bool:
         updated = True
 
     # Fetch per-commit manifests for parsed commits
-    manifest_dir = index_path / "manifests" / org / name
-    manifest_dir.mkdir(parents=True, exist_ok=True)
+    commits_dir = repo_dir / "commits"
+    commits_dir.mkdir(parents=True, exist_ok=True)
 
     for commit in repo_manifest.get("repolex:trackedCommit", []):
         if commit.get("repolex:parseStatus") != "parsed":
@@ -66,7 +66,7 @@ def sync_repo(full_name: str, storage_repo: str, index_path: Path) -> bool:
         if not sha:
             continue
 
-        commit_file = manifest_dir / f"commit-manifest-{sha}.jsonld"
+        commit_file = commits_dir / f"commit-manifest-{sha}.jsonld"
         if commit_file.exists():
             continue
 
