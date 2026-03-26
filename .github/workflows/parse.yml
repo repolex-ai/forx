@@ -79,7 +79,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
-          uv tool install "git+https://x-access-token:${GH_TOKEN}@github.com/repolex-ai/repolex-parser-py.git@v0.0.6"
+          uv tool install "git+https://x-access-token:${GH_TOKEN}@github.com/repolex-ai/repolex-parser-py.git@v0.0.7"
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Configure git auth
