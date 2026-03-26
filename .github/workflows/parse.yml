@@ -12,6 +12,10 @@ on:
       storage_repo:
         description: 'Storage repo (repolex-forx/org--name)'
         required: true
+      parser_ref:
+        description: 'Parser git ref to install (default: v0.0.7, use "main" for latest)'
+        required: false
+        default: 'v0.0.7'
 
 jobs:
   parse:
@@ -79,7 +83,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
-          uv tool install "git+https://x-access-token:${GH_TOKEN}@github.com/repolex-ai/repolex-parser-py.git@v0.0.7"
+          uv tool install "git+https://x-access-token:${GH_TOKEN}@github.com/repolex-ai/repolex-parser-py.git@${{ inputs.parser_ref }}"
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Configure git auth
