@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from rich.console import Console
 from rich.table import Table
 
-from . import db, dispatch
+from . import db, dispatch, index
 
 console = Console()
 
@@ -125,6 +125,17 @@ def run_loop(conn, max_concurrent: int = dispatch.MAX_CONCURRENT, poll_interval:
         completed, failed = check_running(conn)
         if completed or failed:
             console.print(f"  [dim]Batch: {completed} complete, {failed} failed[/]")
+
+            # Sync index and update profile when parses complete
+            if completed > 0:
+                try:
+                    index_path = index.get_index_path()
+                    updated = index.sync_all(conn, index_path)
+                    if updated:
+                        index.push_index(index_path, message=f"Sync {updated} repos")
+                        index.update_profile_readme(index_path)
+                except Exception as e:
+                    console.print(f"  [dim yellow]Index sync: {e}[/]")
 
         # Fill available slots
         dispatched = fill_slots(conn, max_concurrent)
