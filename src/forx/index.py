@@ -139,11 +139,15 @@ def update_profile_readme(index_path: Path):
         if not full_name:
             continue
 
+        # Derive storage repo from full_name
+        storage_repo = f"repolex-forx/{full_name.replace('/', '--')}"
+
         for commit in manifest.get("repolex:trackedCommit", []):
             if commit.get("repolex:parseStatus") != "parsed":
                 continue
             parsed.append({
                 "full_name": full_name,
+                "storage_repo": storage_repo,
                 "tag": commit.get("git:tagName", ""),
                 "sha": commit.get("git:hexsha", "")[:10],
                 "parsed_at": commit.get("repolex:parsedAt", ""),
@@ -158,10 +162,11 @@ def update_profile_readme(index_path: Path):
     for p in latest:
         source = f"[{p['full_name']}](https://github.com/{p['full_name']})"
         tag = p["tag"] or f"`{p['sha']}`"
+        data = f"[view](https://github.com/{p['storage_repo']})"
         date = p["parsed_at"][:10] if p["parsed_at"] else ""
-        rows.append(f"| {source} | {tag} | {date} |")
+        rows.append(f"| {source} | {tag} | {data} | {date} |")
 
-    table_content = "\n".join(rows) if rows else "| *No repos parsed yet* | | |"
+    table_content = "\n".join(rows) if rows else "| *No repos parsed yet* | | | |"
 
     # Read and update README
     readme = readme_file.read_text()
@@ -171,7 +176,7 @@ def update_profile_readme(index_path: Path):
     if start_marker in readme and end_marker in readme:
         before = readme.split(start_marker)[0]
         after = readme.split(end_marker)[1]
-        new_readme = f"{before}{start_marker}\n| Source | Tag | Parsed |\n|--------|-----|--------|\n{table_content}\n{end_marker}{after}"
+        new_readme = f"{before}{start_marker}\n| Source | Tag | Data | Parsed |\n|--------|-----|------|--------|\n{table_content}\n{end_marker}{after}"
 
         if new_readme != readme:
             readme_file.write_text(new_readme)
