@@ -108,6 +108,85 @@ def sync_all(conn, index_path: Path | None = None) -> int:  # noqa: conn used fo
     return updated
 
 
+DEFAULT_PROFILE_PATH = Path.home() / "repos" / "repolex-forx" / ".github"
+
+
+def update_profile_readme(index_path: Path):
+    """Update the .github profile README with recently parsed repos from the index."""
+    profile_path = Path(os.environ.get("FORX_PROFILE_PATH", str(DEFAULT_PROFILE_PATH)))
+    readme_file = profile_path / "profile" / "README.md"
+
+    if not readme_file.exists():
+        console.print("[dim]Profile README not found, skipping[/]")
+        return
+
+    # Collect all parsed commits from the index
+    parsed = []
+    repos_dir = index_path / "repos"
+    if not repos_dir.exists():
+        return
+
+    for manifest_file in repos_dir.rglob("repo-manifest.jsonld"):
+        with open(manifest_file) as f:
+            try:
+                manifest = json.load(f)
+            except json.JSONDecodeError:
+                continue
+
+        repo_id = manifest.get("@id", "")
+        # Extract org/repo from https://repolex.ai/r/org/repo
+        full_name = repo_id.split("/r/")[-1] if "/r/" in repo_id else ""
+        if not full_name:
+            continue
+
+        for commit in manifest.get("repolex:trackedCommit", []):
+            if commit.get("repolex:parseStatus") != "parsed":
+                continue
+            parsed.append({
+                "full_name": full_name,
+                "tag": commit.get("git:tagName", ""),
+                "sha": commit.get("git:hexsha", "")[:10],
+                "parsed_at": commit.get("repolex:parsedAt", ""),
+            })
+
+    # Sort by parsed_at descending, take latest 10
+    parsed.sort(key=lambda x: x["parsed_at"], reverse=True)
+    latest = parsed[:10]
+
+    # Build table rows
+    rows = []
+    for p in latest:
+        source = f"[{p['full_name']}](https://github.com/{p['full_name']})"
+        tag = p["tag"] or f"`{p['sha']}`"
+        date = p["parsed_at"][:10] if p["parsed_at"] else ""
+        rows.append(f"| {source} | {tag} | {date} |")
+
+    table_content = "\n".join(rows) if rows else "| *No repos parsed yet* | | |"
+
+    # Read and update README
+    readme = readme_file.read_text()
+    start_marker = "<!-- AUTO-UPDATED BY FORX - DO NOT EDIT BELOW -->"
+    end_marker = "<!-- END AUTO-UPDATED -->"
+
+    if start_marker in readme and end_marker in readme:
+        before = readme.split(start_marker)[0]
+        after = readme.split(end_marker)[1]
+        new_readme = f"{before}{start_marker}\n| Source | Tag | Parsed |\n|--------|-----|--------|\n{table_content}\n{end_marker}{after}"
+
+        if new_readme != readme:
+            readme_file.write_text(new_readme)
+            # Commit and push
+            subprocess.run(["git", "add", "profile/README.md"], cwd=profile_path, check=True)
+            result = subprocess.run(["git", "diff", "--staged", "--quiet"], cwd=profile_path)
+            if result.returncode != 0:
+                subprocess.run(
+                    ["git", "commit", "-m", "Update recently parsed repos"],
+                    cwd=profile_path, check=True,
+                )
+                subprocess.run(["git", "push"], cwd=profile_path, check=True)
+                console.print("[green]Updated profile README[/]")
+
+
 def push_index(index_path: Path | None = None, message: str = "Update index"):
     """Git add, commit, and push the forx-index repo."""
     if index_path is None:

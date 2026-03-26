@@ -307,6 +307,10 @@ def index_cmd(ctx, push):
     if push and updated > 0:
         index.push_index(index_path, message=f"Sync {updated} repos")
 
+    # Update the org profile README with latest parsed repos
+    if push:
+        index.update_profile_readme(index_path)
+
 
 @cli.command()
 @click.pass_context
