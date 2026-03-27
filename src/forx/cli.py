@@ -67,6 +67,69 @@ def add(ctx, repos, head):
 
 
 @cli.command()
+@click.argument("org")
+@click.option("--include-forks", is_flag=True, help="Include forked repos")
+@click.option("--min-stars", default=0, help="Only add repos with at least this many stars")
+@click.pass_context
+def add_org(ctx, org, include_forks, min_stars):
+    """Add all repos from a GitHub org or user.
+
+    Discovers all non-archived repos and their tags.
+
+    Examples:
+        forx add-org pallets
+        forx add-org NousResearch --min-stars 10
+        forx add-org someuser --include-forks
+    """
+    conn = ctx.obj["conn"]
+
+    console.print(f"[bold]Listing repos for {org}...[/]")
+    try:
+        repos = discover.list_org_repos(org, include_forks=include_forks)
+    except Exception as e:
+        console.print(f"[red]Failed: {e}[/]")
+        return
+
+    if min_stars:
+        repos = [r for r in repos if r.get("stars", 0) >= min_stars]
+
+    console.print(f"Found {len(repos)} repos\n")
+
+    added = 0
+    for repo_info in repos:
+        full_name = repo_info["full_name"]
+        lang = repo_info.get("language") or "?"
+        stars = repo_info.get("stars", 0)
+
+        # Check if already tracked
+        existing = conn.execute(
+            "SELECT id FROM repos WHERE full_name = ?", (full_name,)
+        ).fetchone()
+        if existing:
+            console.print(f"  [dim]{full_name} ({lang}, {stars}★) - already tracked[/]")
+            continue
+
+        console.print(f"  [cyan]{full_name}[/] ({lang}, {stars}★)...", end=" ")
+
+        repo_id = db.add_repo(conn, full_name)
+
+        try:
+            tags = discover.discover_repo(full_name)
+        except Exception as e:
+            console.print(f"[red]error: {e}[/]")
+            continue
+
+        if tags:
+            db.add_tags(conn, repo_id, tags)
+            console.print(f"[green]{len(tags)} tags[/]")
+            added += 1
+        else:
+            console.print("[yellow]no tags[/]")
+
+    console.print(f"\n[bold green]Added {added} repos from {org}[/]")
+
+
+@cli.command()
 @click.argument("repo")
 @click.pass_context
 def parse(ctx, repo):

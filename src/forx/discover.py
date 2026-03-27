@@ -1,5 +1,6 @@
-"""Discover tags from GitHub repos."""
+"""Discover tags and repos from GitHub."""
 
+import json
 import subprocess
 
 
@@ -50,3 +51,40 @@ def discover_repo(repo_full_name: str) -> list[str]:
     The git tag is what we checkout, no transformation needed.
     """
     return get_git_tags(repo_full_name)
+
+
+def list_org_repos(org: str, include_forks: bool = False) -> list[dict]:
+    """
+    List all repos in a GitHub org/user using gh CLI.
+    Returns list of {full_name, language, stars, fork} dicts.
+    """
+    args = [
+        "gh", "api", "--paginate",
+        f"/orgs/{org}/repos",
+        "--jq", ".[] | {full_name: .full_name, language: .language, stars: .stargazers_count, fork: .fork, archived: .archived}",
+    ]
+    result = subprocess.run(args, capture_output=True, text=True, timeout=60)
+
+    if result.returncode != 0:
+        # Try as user instead of org
+        args[3] = f"/users/{org}/repos"
+        result = subprocess.run(args, capture_output=True, text=True, timeout=60)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to list repos for {org}: {result.stderr.strip()}")
+
+    repos = []
+    for line in result.stdout.strip().split("\n"):
+        if not line:
+            continue
+        try:
+            repo = json.loads(line)
+            if repo.get("archived"):
+                continue
+            if not include_forks and repo.get("fork"):
+                continue
+            repos.append(repo)
+        except json.JSONDecodeError:
+            continue
+
+    return repos
