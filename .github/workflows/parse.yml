@@ -298,6 +298,11 @@ jobs:
           uv tool install "git+https://x-access-token:${GH_TOKEN}@github.com/repolex-ai/repolex-parser-py.git"
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
+      - name: Set up Swift
+        uses: swiftlang/setup-swift@v2
+        with:
+          swift-version: "6.0"
+
       - name: Cache LSP servers
         id: lsp-cache
         uses: actions/cache@v4
@@ -306,7 +311,9 @@ jobs:
             ~/.local/share/uv/tools/repolex/lib/python3.12/site-packages/multilspy/language_servers
             ~/.local/share/uv/tools/repolex/lib/python3.13/site-packages/multilspy/language_servers
             ~/.multilspy
-          key: lsp-servers-${{ runner.os }}-v4
+            ~/.local/share/uv/tools/repolex/lib/python3.12/site-packages/multilspy/language_servers/sourcekit_lsp/static
+            ~/.local/share/uv/tools/repolex/lib/python3.13/site-packages/multilspy/language_servers/sourcekit_lsp/static
+          key: lsp-servers-${{ runner.os }}-v5
           restore-keys: |
             lsp-servers-${{ runner.os }}-
 
@@ -343,6 +350,7 @@ jobs:
               ("Kotlin", Language.KOTLIN),
               ("Dart", Language.DART),
               ("Scala", Language.SCALA),
+              ("Swift", Language.SWIFT),
           ]
 
           logger = MultilspyLogger()
