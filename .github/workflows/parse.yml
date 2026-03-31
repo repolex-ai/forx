@@ -13,9 +13,9 @@ on:
         description: 'Storage repo (repolex-forx/org--name)'
         required: true
       parser_ref:
-        description: 'Parser git ref to install (default: v0.1.0, use "main" for latest unstable)'
+        description: 'Parser git ref to install (default: v0.1.2)'
         required: false
-        default: 'v0.1.0'
+        default: 'v0.1.2'
 
 jobs:
   parse:
