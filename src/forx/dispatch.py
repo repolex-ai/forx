@@ -7,6 +7,8 @@ import urllib.request
 import urllib.error
 
 
+from .db import PARSER_VERSION
+
 WORKFLOW_FILE = "parse.yml"
 WORKFLOW_REPO = "repolex-ai/forx"
 MAX_CONCURRENT = 20
@@ -38,6 +40,7 @@ def dispatch_workflow(repo: str, tag: str, storage_repo: str) -> str:
         "-f", f"repo={repo}",
         "-f", f"tag={tag}",
         "-f", f"storage_repo={storage_repo}",
+        "-f", f"parser_ref={PARSER_VERSION}",
     ])
 
     # gh workflow run doesn't return the run ID, so we need to find it

@@ -10,7 +10,7 @@ DEFAULT_DB_PATH = Path.home() / ".forx" / "forx.db"
 # Bump this when repolex-parser-py gets a new release that
 # changes output format. Tags parsed with an older version
 # can be invalidated with `forx reparse`.
-PARSER_VERSION = "v0.1.0"
+PARSER_VERSION = "v0.1.3"
 
 MIGRATIONS = [
     # v1: initial schema
@@ -75,6 +75,12 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(tags)").fetchall()}
     if "parser_version" not in cols:
         conn.execute("ALTER TABLE tags ADD COLUMN parser_version TEXT")
+        conn.commit()
+
+    # Add priority column to repos if missing (higher = parsed sooner)
+    repo_cols = {r[1] for r in conn.execute("PRAGMA table_info(repos)").fetchall()}
+    if "priority" not in repo_cols:
+        conn.execute("ALTER TABLE repos ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
         conn.commit()
 
     return conn
@@ -163,7 +169,7 @@ def get_pending_tags(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.
              )
            GROUP BY r.id
            HAVING t.id = MIN(t.id)
-           ORDER BY r.id
+           ORDER BY r.priority DESC, r.id
            LIMIT ?""",
         (limit,),
     ).fetchall()
