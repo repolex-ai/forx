@@ -376,6 +376,26 @@ def index_cmd(ctx, push):
 
 
 @cli.command()
+@click.argument("repos", nargs=-1, required=True)
+@click.option("--level", default=10, show_default=True, help="Priority level (higher = sooner)")
+@click.pass_context
+def prioritize(ctx, repos, level):
+    """Bump repos to the front of the parse queue.
+
+    Example: forx prioritize apache/jena Jelly-RDF/jelly-jvm
+    """
+    conn = ctx.obj["conn"]
+    for repo in repos:
+        row = conn.execute("SELECT id FROM repos WHERE full_name = ?", (repo,)).fetchone()
+        if not row:
+            click.echo(f"  [not found] {repo}")
+            continue
+        conn.execute("UPDATE repos SET priority = ? WHERE id = ?", (level, row["id"]))
+        click.echo(f"  [priority={level}] {repo}")
+    conn.commit()
+
+
+@cli.command()
 @click.pass_context
 def crawl(ctx):
     """Spider all parsed repos and queue their dependencies.
