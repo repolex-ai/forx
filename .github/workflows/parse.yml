@@ -15,7 +15,7 @@ on:
       parser_ref:
         description: 'Parser git ref to install (default: v0.1.3)'
         required: false
-        default: 'v0.1.3'
+        default: 'v0.1.2'
 
 jobs:
   parse:
