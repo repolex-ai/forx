@@ -371,30 +371,42 @@ jobs:
           print("\nLSP warm-up complete!")
           PYEOF
 
-      - name: Aggregate and enrich
+      - name: Aggregate and enrich (batched)
         env:
           REPOLEX_STORAGE_DIR: ${{ github.workspace }}/storage
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
           PYTHONUNBUFFERED: "1"
+          REPOLEX_TIME_BUDGET_SECONDS: "18000"
         run: |
           # Ensure LSP runtime deps are on PATH
           export PATH="$HOME/go/bin:$HOME/.local/share/gem/ruby/3.2.0/bin:$PATH"
           cd /tmp/source
-          repolex aggregate ${{ inputs.repo }} ${{ inputs.tag }} --repo-path /tmp/source
+          while true; do
+            set +e
+            repolex aggregate ${{ inputs.repo }} ${{ inputs.tag }} --repo-path /tmp/source
+            EXIT_CODE=$?
+            set -e
 
-      - name: Commit enrichment results
-        env:
-          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
-        run: |
-          cd ${{ github.workspace }}/storage
-          git add .
-          git diff --staged --quiet && echo "No enrichment changes to commit" && exit 0
-          git stash
-          git pull --rebase origin main || true
-          git stash pop || true
-          git add .
-          git commit -m "Enrich ${{ inputs.repo }}@${{ inputs.tag }} (${{ env.COMMIT_SHA }})"
-          git push
+            # Commit progress
+            cd ${{ github.workspace }}/storage
+            git add .
+            if ! git diff --staged --quiet; then
+              git pull --rebase origin main || true
+              git commit -m "Enrich ${{ inputs.repo }}@${{ inputs.tag }} checkpoint (${{ env.COMMIT_SHA }})"
+              git push
+            fi
+            cd /tmp/source
+
+            if [ $EXIT_CODE -eq 0 ]; then
+              echo "Enrichment complete"
+              break
+            elif [ $EXIT_CODE -eq 7 ]; then
+              echo "LSP checkpoint committed, continuing..."
+            else
+              echo "Enrichment failed with exit code $EXIT_CODE"
+              exit $EXIT_CODE
+            fi
+          done
 
       - name: Rebuild index.json
         env:
