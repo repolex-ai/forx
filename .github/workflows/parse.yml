@@ -376,7 +376,6 @@ jobs:
           REPOLEX_STORAGE_DIR: ${{ github.workspace }}/storage
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
           PYTHONUNBUFFERED: "1"
-          REPOLEX_TIME_BUDGET_SECONDS: "18000"
         run: |
           # Ensure LSP runtime deps are on PATH
           export PATH="$HOME/go/bin:$HOME/.local/share/gem/ruby/3.2.0/bin:$PATH"
