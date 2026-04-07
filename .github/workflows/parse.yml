@@ -371,6 +371,20 @@ jobs:
           print("\nLSP warm-up complete!")
           PYEOF
 
+      - name: Materialize Maven dependencies (Java repos)
+        run: |
+          # JDTLS reads from ~/.m2/ to resolve symbols. Without this step, JDTLS
+          # tries to download deps live during LSP requests, causing slow None
+          # responses for legitimate symbols. dependency:resolve is faster than
+          # install/compile and just downloads to the local cache.
+          if [ -f "/tmp/source/pom.xml" ]; then
+            echo "Found pom.xml — resolving Maven dependencies..."
+            cd /tmp/source
+            mvn dependency:resolve -B -q -DskipTests || echo "Maven resolve failed (continuing — JDTLS may fall back to live downloads)"
+          else
+            echo "No pom.xml at top level — skipping Maven resolve"
+          fi
+
       - name: AST phase (build chunks)
         env:
           REPOLEX_STORAGE_DIR: ${{ github.workspace }}/storage
