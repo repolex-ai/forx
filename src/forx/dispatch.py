@@ -13,7 +13,16 @@ WORKFLOW_FILE = "parse.yml"
 WORKFLOW_REPO = "repolex-ai/forx"
 MAX_CONCURRENT = 20
 POLL_INTERVAL = 120  # seconds between manifest checks (no API rate limit concern)
-STALE_TIMEOUT = 18000  # 5 hours - big repos like pixeltable can take a long time
+STALE_TIMEOUT = 25200  # 7 hours per phase — Option B: each iteration gets a fresh 6hr Actions wall
+
+# Option B safety cap: max iterations per tag before forx gives up.
+# Each iteration is one phase dispatch (parse, ast, enrich, combine).
+# Big enrich phases (e.g. jena) might take ~15 iterations. 50 is a generous safety net.
+MAX_ITERATIONS_PER_TAG = 50
+
+# Valid next_action values from .next-action.json (parser-side contract)
+VALID_PHASES = {"parse", "ast", "enrich", "combine"}
+TERMINAL_ACTION = "done"
 
 
 def gh_run(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
@@ -29,18 +38,32 @@ def gh_run(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
     return result
 
 
-def dispatch_workflow(repo: str, tag: str, storage_repo: str) -> str:
+def dispatch_workflow(
+    repo: str,
+    tag: str,
+    storage_repo: str,
+    phase: str = "parse",
+    parser_ref: str | None = None,
+) -> str:
     """
-    Dispatch a parse workflow run.
+    Dispatch a parse workflow run for a specific phase.
+
+    Phases: 'parse' | 'ast' | 'enrich' | 'combine'.
     Returns the workflow run ID.
     """
+    if phase not in VALID_PHASES:
+        raise ValueError(f"Invalid phase {phase!r}. Must be one of {sorted(VALID_PHASES)}")
+
+    ref = parser_ref or PARSER_VERSION
+
     gh_run([
         "workflow", "run", WORKFLOW_FILE,
         "--repo", WORKFLOW_REPO,
         "-f", f"repo={repo}",
         "-f", f"tag={tag}",
         "-f", f"storage_repo={storage_repo}",
-        "-f", f"parser_ref={PARSER_VERSION}",
+        "-f", f"parser_ref={ref}",
+        "-f", f"phase={phase}",
     ])
 
     # gh workflow run doesn't return the run ID, so we need to find it
@@ -58,7 +81,7 @@ def dispatch_workflow(repo: str, tag: str, storage_repo: str) -> str:
     if runs:
         return str(runs[0]["databaseId"])
 
-    raise RuntimeError(f"Could not find workflow run after dispatch for {repo}@{tag}")
+    raise RuntimeError(f"Could not find workflow run after dispatch for {repo}@{tag} (phase={phase})")
 
 
 def fetch_json(storage_repo: str, path: str) -> dict | None:
@@ -115,3 +138,50 @@ def get_run_logs(run_id: str) -> str:
         check=False,
     )
     return result.stdout[-2000:] if result.stdout else result.stderr[-2000:]
+
+
+# ============================================================================
+# Option B: phase-driven dispatch helpers
+# ============================================================================
+
+
+def read_next_action(storage_repo: str) -> dict | None:
+    """
+    Read aggregate/.next-action.json from a storage repo.
+
+    Returns parsed JSON dict with at least:
+      - next_action: 'parse' | 'ast' | 'enrich' | 'combine' | 'done'
+      - phase_completed: descriptor of what just finished
+      - ts: ISO timestamp
+
+    Returns None if the file doesn't exist (parser bug or fresh tag).
+    """
+    return fetch_json(storage_repo, "aggregate/.next-action.json")
+
+
+def check_workflow_run_status(run_id: str) -> tuple[str, str] | None:
+    """
+    Check status of a workflow run via gh API.
+
+    Returns (status, conclusion) tuple where:
+      - status: 'queued' | 'in_progress' | 'completed' | ...
+      - conclusion: 'success' | 'failure' | 'cancelled' | '' (empty if not completed)
+
+    Returns None if the run can't be found.
+    """
+    result = gh_run(
+        [
+            "api",
+            f"repos/{WORKFLOW_REPO}/actions/runs/{run_id}",
+            "--jq",
+            "{status: .status, conclusion: .conclusion}",
+        ],
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        data = json.loads(result.stdout)
+        return data.get("status", ""), data.get("conclusion", "") or ""
+    except json.JSONDecodeError:
+        return None

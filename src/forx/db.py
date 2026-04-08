@@ -83,6 +83,17 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
         conn.execute("ALTER TABLE repos ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
         conn.commit()
 
+    # Add phase-driven dispatch columns (Option B refactor)
+    if "current_phase" not in cols:
+        conn.execute("ALTER TABLE tags ADD COLUMN current_phase TEXT")
+        conn.commit()
+    if "iteration_count" not in cols:
+        conn.execute("ALTER TABLE tags ADD COLUMN iteration_count INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    if "next_action" not in cols:
+        conn.execute("ALTER TABLE tags ADD COLUMN next_action TEXT")
+        conn.commit()
+
     return conn
 
 
@@ -157,9 +168,17 @@ def get_pending_tags(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.
     have a dispatched job. This ensures sequential parsing within a repo
     (so each job builds on the previous one's blob cache) while still
     running up to `limit` repos in parallel.
+
+    Returns rows with `next_action` and `iteration_count` so the orchestrator
+    can determine which phase to dispatch (Option B):
+      - next_action IS NULL → fresh tag, dispatch phase=parse
+      - next_action == "parse" → blob batching not done, re-dispatch phase=parse
+      - next_action == "ast"/"enrich"/"combine" → dispatch that phase
+      - next_action == "done" → shouldn't appear here (status would be complete)
     """
     return conn.execute(
         """SELECT t.id, t.git_tag, t.commit_sha,
+                  t.next_action, t.iteration_count, t.current_phase,
                   r.full_name, r.storage_repo, r.org, r.name
            FROM tags t
            JOIN repos r ON t.repo_id = r.id
@@ -179,6 +198,7 @@ def get_dispatched_tags(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Get tags currently dispatched/parsing."""
     return conn.execute(
         """SELECT t.id, t.git_tag, t.workflow_run_id, t.dispatched_at,
+                  t.current_phase, t.iteration_count, t.next_action,
                   r.full_name, r.storage_repo
            FROM tags t
            JOIN repos r ON t.repo_id = r.id
@@ -187,11 +207,46 @@ def get_dispatched_tags(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def mark_dispatched(conn: sqlite3.Connection, tag_id: int, run_id: str):
-    """Mark a tag as dispatched to GitHub Actions."""
+def mark_dispatched(conn: sqlite3.Connection, tag_id: int, run_id: str, phase: str = "parse"):
+    """
+    Mark a tag as dispatched to GitHub Actions.
+    Records which phase was dispatched and increments iteration count.
+    """
     conn.execute(
-        "UPDATE tags SET status = 'dispatched', workflow_run_id = ?, dispatched_at = ? WHERE id = ?",
-        (run_id, now(), tag_id),
+        """UPDATE tags
+           SET status = 'dispatched',
+               workflow_run_id = ?,
+               dispatched_at = ?,
+               current_phase = ?,
+               iteration_count = iteration_count + 1
+           WHERE id = ?""",
+        (run_id, now(), phase, tag_id),
+    )
+    conn.commit()
+
+
+def update_next_action(conn: sqlite3.Connection, tag_id: int, next_action: str):
+    """Record the next_action value read from .next-action.json after a phase completed."""
+    conn.execute(
+        "UPDATE tags SET next_action = ? WHERE id = ?",
+        (next_action, tag_id),
+    )
+    conn.commit()
+
+
+def reset_to_pending(conn: sqlite3.Connection, tag_id: int):
+    """
+    Reset a tag back to pending state so it can be re-dispatched for the next phase.
+    Used by the Option B orchestrator after reading next_action from .next-action.json.
+    Iteration count is preserved.
+    """
+    conn.execute(
+        """UPDATE tags
+           SET status = 'pending',
+               workflow_run_id = NULL,
+               dispatched_at = NULL
+           WHERE id = ?""",
+        (tag_id,),
     )
     conn.commit()
 
