@@ -13,25 +13,29 @@ on:
         description: 'Storage repo (repolex-forx/org--name)'
         required: true
       parser_ref:
-        description: 'Parser git ref to install (default: v0.1.3)'
+        description: 'Parser git ref to install'
         required: false
-        default: 'v0.1.2'
+        default: 'main'
+      phase:
+        description: 'Phase to run: parse | ast | enrich | combine'
+        required: true
+        default: 'parse'
 
 jobs:
-  parse:
-    name: "Parse ${{ inputs.repo }}@${{ inputs.tag }}"
+  run:
+    name: "${{ inputs.phase }} ${{ inputs.repo }}@${{ inputs.tag }} (parser_ref=${{ inputs.parser_ref }})"
     runs-on: ubuntu-latest
-    outputs:
-      blobs_complete: ${{ steps.parse.outputs.blobs_complete }}
-      commit_sha: ${{ steps.checkout-source.outputs.commit_sha }}
 
     steps:
+      # ============================================================
+      # SETUP — runs for every dispatch (~3-5 min total)
+      # ============================================================
+
       - name: Setup storage repo
         env:
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
           if ! gh repo view ${{ inputs.storage_repo }} &>/dev/null; then
-            # Mirror source repo visibility
             VISIBILITY=$(gh repo view ${{ inputs.repo }} --json isPrivate --jq 'if .isPrivate then "--private" else "--public" end' 2>/dev/null || echo "--public")
             gh repo create ${{ inputs.storage_repo }} \
               $VISIBILITY \
@@ -92,43 +96,163 @@ jobs:
         run: |
           git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
 
-      - name: Parse blobs (batched)
-        id: parse
+      # ============================================================
+      # JAVA SETUP — only for non-parse phases on Maven repos
+      # ============================================================
+
+      - name: Cache Maven local repository
+        if: inputs.phase != 'parse'
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: m2-${{ runner.os }}-${{ inputs.repo }}-${{ inputs.tag }}
+          restore-keys: |
+            m2-${{ runner.os }}-${{ inputs.repo }}-
+            m2-${{ runner.os }}-
+
+      - name: Materialize Maven dependencies (Java repos)
+        if: inputs.phase != 'parse'
+        run: |
+          # JDTLS reads from ~/.m2/ to resolve symbols. Without this step, JDTLS
+          # tries to download deps live during LSP requests, causing slow None
+          # responses for legitimate symbols. Cached between dispatches via
+          # the actions/cache step above.
+          if [ -f "/tmp/source/pom.xml" ]; then
+            echo "Found pom.xml — resolving Maven dependencies..."
+            cd /tmp/source
+            mvn dependency:resolve -B -q -DskipTests || echo "Maven resolve failed (continuing — JDTLS may fall back to live downloads)"
+          else
+            echo "No pom.xml at top level — skipping Maven resolve"
+          fi
+
+      # ============================================================
+      # LSP SETUP — only for phases that need language servers
+      # ============================================================
+
+      - name: Cache LSP servers
+        if: inputs.phase != 'parse'
+        id: lsp-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/uv/tools/repolex/lib/python3.12/site-packages/multilspy/language_servers
+            ~/.local/share/uv/tools/repolex/lib/python3.13/site-packages/multilspy/language_servers
+            ~/.multilspy
+            ~/.local/share/uv/tools/repolex/lib/python3.12/site-packages/multilspy/language_servers/sourcekit_lsp/static
+            ~/.local/share/uv/tools/repolex/lib/python3.13/site-packages/multilspy/language_servers/sourcekit_lsp/static
+          key: lsp-servers-${{ runner.os }}-v5
+          restore-keys: |
+            lsp-servers-${{ runner.os }}-
+
+      - name: Warm LSP servers
+        if: inputs.phase != 'parse' && steps.lsp-cache.outputs.cache-hit != 'true'
+        run: |
+          echo "Cache miss - warming all LSP servers..."
+
+          # Install Go LSP server
+          go install golang.org/x/tools/gopls@latest 2>/dev/null || echo "gopls install failed"
+
+          # Install Ruby LSP server (user-level to avoid permission issues)
+          gem install --user-install solargraph 2>/dev/null || echo "solargraph install failed"
+          export PATH="$HOME/.local/share/gem/ruby/3.2.0/bin:$PATH"
+
+          REPOLEX_VENV="$HOME/.local/share/uv/tools/repolex"
+          $REPOLEX_VENV/bin/python << 'PYEOF'
+          import time, tempfile
+          from pathlib import Path
+
+          from multilspy.multilspy_config import MultilspyConfig, Language
+          from multilspy.multilspy_logger import MultilspyLogger
+          from multilspy.language_server import LanguageServer
+
+          languages = [
+              ("Python", Language.PYTHON),
+              ("Java", Language.JAVA),
+              ("TypeScript", Language.TYPESCRIPT),
+              ("JavaScript", Language.JAVASCRIPT),
+              ("Rust", Language.RUST),
+              ("Go", Language.GO),
+              ("Ruby", Language.RUBY),
+              ("C#", Language.CSHARP),
+              ("Kotlin", Language.KOTLIN),
+              ("Dart", Language.DART),
+              ("Scala", Language.SCALA),
+              ("Swift", Language.SWIFT),
+          ]
+
+          logger = MultilspyLogger()
+
+          for name, lang in languages:
+              start = time.time()
+              print(f"Warming {name}...", end=" ", flush=True)
+              try:
+                  with tempfile.TemporaryDirectory() as tmpdir:
+                      dummy = Path(tmpdir) / "dummy.txt"
+                      dummy.write_text("// dummy\n")
+                      config = MultilspyConfig.from_dict({"code_language": lang})
+                      lsp = LanguageServer.create(config, logger, str(tmpdir))
+                      print(f"OK ({time.time() - start:.1f}s)")
+              except Exception as e:
+                  print(f"WARN ({time.time() - start:.1f}s): {e}")
+
+          print("\nLSP warm-up complete!")
+          PYEOF
+
+      # ============================================================
+      # PHASE EXECUTION
+      # ============================================================
+
+      - name: Run phase
         env:
           REPOLEX_STORAGE_DIR: ${{ github.workspace }}/storage
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
           PYTHONUNBUFFERED: "1"
         run: |
+          export PATH="$HOME/go/bin:$HOME/.local/share/gem/ruby/3.2.0/bin:$PATH"
           cd /tmp/source
-          while true; do
-            set +e
+
+          set +e
+          if [ "${{ inputs.phase }}" = "parse" ]; then
             repolex parse ${{ inputs.repo }} ${{ inputs.tag }} --gh
-            EXIT_CODE=$?
-            set -e
+          else
+            repolex aggregate ${{ inputs.repo }} ${{ inputs.tag }} --phase ${{ inputs.phase }} --repo-path /tmp/source
+          fi
+          EXIT_CODE=$?
+          set -e
 
-            # Commit progress
-            cd ${{ github.workspace }}/storage
-            git add .
-            if ! git diff --staged --quiet; then
-              git pull --rebase origin main || true
-              git commit -m "Parse ${{ inputs.repo }}@${{ inputs.tag }} batch (${{ env.COMMIT_SHA }})"
-              git push
-            fi
-            cd /tmp/source
+          # Exit codes 0 and 7 are both "parser exited cleanly, .next-action.json
+          # was written." Anything else is a real error.
+          if [ $EXIT_CODE -ne 0 ] && [ $EXIT_CODE -ne 7 ]; then
+            echo "Parser failed with exit code $EXIT_CODE"
+            exit $EXIT_CODE
+          fi
 
-            if [ $EXIT_CODE -eq 0 ]; then
-              echo "blobs_complete=true" >> $GITHUB_OUTPUT
-              echo "Blob parsing complete"
-              break
-            elif [ $EXIT_CODE -eq 7 ]; then
-              echo "Batch committed, continuing..."
-            else
-              echo "Parse failed with exit code $EXIT_CODE"
-              exit $EXIT_CODE
-            fi
-          done
+          echo "Parser exited with code $EXIT_CODE (treated as success — .next-action.json should drive next dispatch)"
 
-      - name: Generate README
+      # ============================================================
+      # COMMIT STORAGE STATE — runs after every phase
+      # ============================================================
+
+      - name: Commit storage state
+        env:
+          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
+        run: |
+          cd ${{ github.workspace }}/storage
+          git add -A
+          if ! git diff --staged --quiet; then
+            git pull --rebase origin main || true
+            git commit -m "Phase ${{ inputs.phase }} for ${{ inputs.repo }}@${{ inputs.tag }} (${{ env.COMMIT_SHA }})"
+            git push
+          else
+            echo "No storage changes to commit for phase ${{ inputs.phase }}"
+          fi
+
+      # ============================================================
+      # COMBINE PHASE FINALIZATION — only after combine succeeds
+      # ============================================================
+
+      - name: Generate README (combine phase only)
+        if: inputs.phase == 'combine'
         run: |
           cd ${{ github.workspace }}/storage
           PARSE_DATE=$(date -u +"%Y-%m-%d")
@@ -215,7 +339,8 @@ jobs:
 
           sed -i "s/PARSE_DATE_PLACEHOLDER/${PARSE_DATE}/" README.md
 
-      - name: Build index.json and commit README
+      - name: Build index.json (combine phase only)
+        if: inputs.phase == 'combine'
         env:
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
@@ -234,7 +359,6 @@ jobs:
                   'tag': m.get('tag', ''),
                   'parsed_at': m.get('parsed_at', ''),
               })
-          # Sort by parsed_at descending (latest first)
           versions.sort(key=lambda v: v.get('parsed_at', ''), reverse=True)
           index = {'org': org_repo[0], 'repo': org_repo[1], 'versions': versions}
           with open('index.json', 'w') as f:
@@ -244,247 +368,8 @@ jobs:
           "
 
           git add README.md index.json
-          git diff --staged --quiet && echo "No changes" && exit 0
-          git pull --rebase origin main || true
-          git commit -m "Update README and index for ${{ inputs.repo }}@${{ inputs.tag }}"
-          git push
-
-  enrich:
-    name: "Enrich ${{ inputs.repo }}@${{ inputs.tag }}"
-    needs: parse
-    if: needs.parse.outputs.blobs_complete == 'true'
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Configure git auth
-        env:
-          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
-        run: |
-          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
-
-      - name: Checkout storage repo
-        env:
-          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
-        run: |
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ inputs.storage_repo }}.git" storage
-          cd storage
-          git config user.name "repolex-bot"
-          git config user.email "bot@repolex.ai"
-
-      - name: Clone and checkout source
-        env:
-          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
-        run: |
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ inputs.repo }}.git" /tmp/source
-          cd /tmp/source
-          git fetch --tags
-          git checkout ${{ inputs.tag }}
-          echo "COMMIT_SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
-      - name: Install repolex
-        env:
-          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
-        run: |
-          uv tool install "git+https://x-access-token:${GH_TOKEN}@github.com/repolex-ai/repolex-parser-py.git@${{ inputs.parser_ref }}"
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
-
-      # - name: Set up Swift
-      #   uses: swiftlang/setup-swift@v2
-      #   with:
-      #     swift-version: "6.0"
-
-      - name: Cache LSP servers
-        id: lsp-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.local/share/uv/tools/repolex/lib/python3.12/site-packages/multilspy/language_servers
-            ~/.local/share/uv/tools/repolex/lib/python3.13/site-packages/multilspy/language_servers
-            ~/.multilspy
-            ~/.local/share/uv/tools/repolex/lib/python3.12/site-packages/multilspy/language_servers/sourcekit_lsp/static
-            ~/.local/share/uv/tools/repolex/lib/python3.13/site-packages/multilspy/language_servers/sourcekit_lsp/static
-          key: lsp-servers-${{ runner.os }}-v5
-          restore-keys: |
-            lsp-servers-${{ runner.os }}-
-
-      - name: Warm LSP servers
-        if: steps.lsp-cache.outputs.cache-hit != 'true'
-        run: |
-          echo "Cache miss - warming all LSP servers..."
-
-          # Install Go LSP server
-          go install golang.org/x/tools/gopls@latest 2>/dev/null || echo "gopls install failed"
-
-          # Install Ruby LSP server (user-level to avoid permission issues)
-          gem install --user-install solargraph 2>/dev/null || echo "solargraph install failed"
-          export PATH="$HOME/.local/share/gem/ruby/3.2.0/bin:$PATH"
-
-          REPOLEX_VENV="$HOME/.local/share/uv/tools/repolex"
-          $REPOLEX_VENV/bin/python << 'PYEOF'
-          import time, tempfile
-          from pathlib import Path
-
-          from multilspy.multilspy_config import MultilspyConfig, Language
-          from multilspy.multilspy_logger import MultilspyLogger
-          from multilspy.language_server import LanguageServer
-
-          languages = [
-              ("Python", Language.PYTHON),
-              ("Java", Language.JAVA),
-              ("TypeScript", Language.TYPESCRIPT),
-              ("JavaScript", Language.JAVASCRIPT),
-              ("Rust", Language.RUST),
-              ("Go", Language.GO),
-              ("Ruby", Language.RUBY),
-              ("C#", Language.CSHARP),
-              ("Kotlin", Language.KOTLIN),
-              ("Dart", Language.DART),
-              ("Scala", Language.SCALA),
-              ("Swift", Language.SWIFT),
-          ]
-
-          logger = MultilspyLogger()
-
-          for name, lang in languages:
-              start = time.time()
-              print(f"Warming {name}...", end=" ", flush=True)
-              try:
-                  with tempfile.TemporaryDirectory() as tmpdir:
-                      dummy = Path(tmpdir) / "dummy.txt"
-                      dummy.write_text("// dummy\n")
-                      config = MultilspyConfig.from_dict({"code_language": lang})
-                      lsp = LanguageServer.create(config, logger, str(tmpdir))
-                      print(f"OK ({time.time() - start:.1f}s)")
-              except Exception as e:
-                  print(f"WARN ({time.time() - start:.1f}s): {e}")
-
-          print("\nLSP warm-up complete!")
-          PYEOF
-
-      - name: Materialize Maven dependencies (Java repos)
-        run: |
-          # JDTLS reads from ~/.m2/ to resolve symbols. Without this step, JDTLS
-          # tries to download deps live during LSP requests, causing slow None
-          # responses for legitimate symbols. dependency:resolve is faster than
-          # install/compile and just downloads to the local cache.
-          if [ -f "/tmp/source/pom.xml" ]; then
-            echo "Found pom.xml — resolving Maven dependencies..."
-            cd /tmp/source
-            mvn dependency:resolve -B -q -DskipTests || echo "Maven resolve failed (continuing — JDTLS may fall back to live downloads)"
-          else
-            echo "No pom.xml at top level — skipping Maven resolve"
-          fi
-
-      - name: AST phase (build chunks)
-        env:
-          REPOLEX_STORAGE_DIR: ${{ github.workspace }}/storage
-          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
-          PYTHONUNBUFFERED: "1"
-        run: |
-          # Ensure LSP runtime deps are on PATH
-          export PATH="$HOME/go/bin:$HOME/.local/share/gem/ruby/3.2.0/bin:$PATH"
-          cd /tmp/source
-          repolex aggregate ${{ inputs.repo }} ${{ inputs.tag }} --phase ast --repo-path /tmp/source
-
-      - name: Enrich phase (checkpoint loop)
-        env:
-          REPOLEX_STORAGE_DIR: ${{ github.workspace }}/storage
-          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
-          PYTHONUNBUFFERED: "1"
-        run: |
-          export PATH="$HOME/go/bin:$HOME/.local/share/gem/ruby/3.2.0/bin:$PATH"
-          cd /tmp/source
-          ITERATION=0
-          while true; do
-            ITERATION=$((ITERATION + 1))
-            echo "=== Enrich iteration $ITERATION ==="
-            set +e
-            repolex aggregate ${{ inputs.repo }} ${{ inputs.tag }} --phase enrich --repo-path /tmp/source
-            EXIT_CODE=$?
-            set -e
-
-            # Commit checkpoint progress (small files only — LSP graph + checkpoint json)
-            cd ${{ github.workspace }}/storage
-            git add -A
-            if ! git diff --staged --quiet; then
-              git pull --rebase origin main || true
-              git commit -m "Enrich ${{ inputs.repo }}@${{ inputs.tag }} iteration $ITERATION (${{ env.COMMIT_SHA }})"
-              git push
-            fi
-            cd /tmp/source
-
-            if [ $EXIT_CODE -eq 0 ]; then
-              echo "Enrichment complete after $ITERATION iterations"
-              break
-            elif [ $EXIT_CODE -eq 7 ]; then
-              echo "LSP checkpoint committed (iteration $ITERATION), continuing..."
-            else
-              echo "Enrichment failed with exit code $EXIT_CODE on iteration $ITERATION"
-              exit $EXIT_CODE
-            fi
-          done
-
-      - name: Combine phase (build repolex graph)
-        env:
-          REPOLEX_STORAGE_DIR: ${{ github.workspace }}/storage
-          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
-          PYTHONUNBUFFERED: "1"
-        run: |
-          export PATH="$HOME/go/bin:$HOME/.local/share/gem/ruby/3.2.0/bin:$PATH"
-          cd /tmp/source
-          repolex aggregate ${{ inputs.repo }} ${{ inputs.tag }} --phase combine --repo-path /tmp/source
-
-      - name: Commit final manifest updates
-        env:
-          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
-        run: |
-          cd ${{ github.workspace }}/storage
-          git add -A
           if ! git diff --staged --quiet; then
             git pull --rebase origin main || true
-            git commit -m "Finalize ${{ inputs.repo }}@${{ inputs.tag }} (${{ env.COMMIT_SHA }})"
+            git commit -m "Update README and index for ${{ inputs.repo }}@${{ inputs.tag }}"
             git push
           fi
-
-      - name: Rebuild index.json
-        env:
-          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
-        run: |
-          cd ${{ github.workspace }}/storage
-
-          # Rebuild index.json from manifests/ directory
-          python3 -c "
-          import json, glob
-          org_repo = '${{ inputs.repo }}'.split('/')
-          versions = []
-          for path in sorted(glob.glob('manifests/*.json')):
-              with open(path) as f:
-                  m = json.load(f)
-              versions.append({
-                  'commit': m.get('commit', ''),
-                  'tag': m.get('tag', ''),
-                  'parsed_at': m.get('parsed_at', ''),
-              })
-          versions.sort(key=lambda v: v.get('parsed_at', ''), reverse=True)
-          index = {'org': org_repo[0], 'repo': org_repo[1], 'versions': versions}
-          with open('index.json', 'w') as f:
-              json.dump(index, f, indent=2)
-              f.write('\n')
-          print(f'Rebuilt index.json with {len(versions)} versions')
-          "
-
-          git add index.json
-          git diff --staged --quiet && echo "No index changes" && exit 0
-          git pull --rebase origin main || true
-          git commit -m "Rebuild index after enrichment for ${{ inputs.repo }}@${{ inputs.tag }}"
-          git push
