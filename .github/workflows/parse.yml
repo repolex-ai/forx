@@ -207,7 +207,6 @@ jobs:
           REPOLEX_STORAGE_DIR: ${{ github.workspace }}/storage
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
           PYTHONUNBUFFERED: "1"
-          REPOLEX_SKIP_LSP: "1"
         run: |
           export PATH="$HOME/go/bin:$HOME/.local/share/gem/ruby/3.2.0/bin:$PATH"
           cd /tmp/source
