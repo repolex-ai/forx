@@ -104,16 +104,25 @@ def fetch_json(storage_repo: str, path: str) -> dict | None:
 def check_manifest_for_tag(storage_repo: str, git_tag: str, dispatched_at: str) -> str | None:
     """
     Check if a tag has been parsed by looking at repo-manifest.jsonld or manifest.json.
-    Returns 'success' if the tag appears as parsed after dispatched_at.
+    Returns 'success' if the tag appears as parsed.
+
+    Option B note: we no longer compare parsed_at against dispatched_at.
+    The manifest's parsed_at is written once during the cycle (typically by the
+    parse phase) so on the final combine-phase dispatch the compare would
+    false-negative because parsed_at < current phase's dispatched_at.
+    Instead we only verify the tag is recorded as parsed. The .next-action.json
+    saying next_action=done is the primary signal; this is defense in depth
+    against "next_action=done but parser never actually wrote the manifest."
+    The dispatched_at parameter is kept for backward compatibility but unused.
     """
+    del dispatched_at  # unused under Option B — see docstring
     # Try repo-manifest.jsonld first (new JSON-LD format)
     repo_manifest = fetch_json(storage_repo, "repo-manifest.jsonld")
     if repo_manifest is not None:
         for commit in repo_manifest.get("repolex:trackedCommit", []):
             tag_name = commit.get("git:tagName", "")
             status = commit.get("repolex:parseStatus", "")
-            parsed_at = commit.get("repolex:parsedAt", "")
-            if tag_name == git_tag and status == "parsed" and parsed_at >= dispatched_at:
+            if tag_name == git_tag and status == "parsed":
                 return "success"
         return None
 
@@ -124,9 +133,7 @@ def check_manifest_for_tag(storage_repo: str, git_tag: str, dispatched_at: str) 
 
     for version in manifest.get("versions", []):
         if version.get("tag") == git_tag:
-            parsed_at = version.get("parsed_at", "")
-            if parsed_at >= dispatched_at:
-                return "success"
+            return "success"
 
     return None
 
