@@ -94,6 +94,15 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
         conn.execute("ALTER TABLE tags ADD COLUMN next_action TEXT")
         conn.commit()
 
+    # Discovery-order column: the index of this tag in the discover.get_git_tags
+    # list at insert time. Lower = newer (because the GitHub tags API returns
+    # newest first). get_pending_tags picks MIN(discovery_order) to get the
+    # "latest" tag per repo. Rows populated before this column existed get 0
+    # by default, so they all tie and fall back to id ordering.
+    if "discovery_order" not in cols:
+        conn.execute("ALTER TABLE tags ADD COLUMN discovery_order INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+
     return conn
 
 
@@ -153,11 +162,19 @@ def add_repo(conn: sqlite3.Connection, full_name: str, head_only: bool = False) 
 
 
 def add_tags(conn: sqlite3.Connection, repo_id: int, git_tags: list[str]):
-    """Add discovered tags for a repo."""
+    """
+    Add discovered tags for a repo.
+
+    The `git_tags` list is expected in newest-first order (as returned by
+    discover.get_git_tags via the GitHub tags API). We record the index
+    as `discovery_order` so get_pending_tags can pick the "latest" tag
+    regardless of insertion id order (which gets muddled when re-discovering
+    repos already in the db).
+    """
     conn.executemany(
-        """INSERT OR IGNORE INTO tags (repo_id, git_tag, status)
-           VALUES (?, ?, 'pending')""",
-        [(repo_id, tag) for tag in git_tags],
+        """INSERT OR IGNORE INTO tags (repo_id, git_tag, status, discovery_order)
+           VALUES (?, ?, 'pending', ?)""",
+        [(repo_id, tag, idx) for idx, tag in enumerate(git_tags)],
     )
     conn.commit()
 
@@ -169,6 +186,18 @@ def get_pending_tags(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.
     (so each job builds on the previous one's blob cache) while still
     running up to `limit` repos in parallel.
 
+    Ordering (broad-and-wide dependency network coverage):
+      1. Repos with ZERO prior complete tags first (bucket them ahead)
+      2. Then by explicit r.priority DESC (canary scoping still works)
+      3. Then by r.id (deterministic tiebreak)
+
+    Per-repo tag pick: the row with MIN(discovery_order). Tags freshly added
+    via discover.get_git_tags get their index in the GitHub-API-returned list
+    (newest first → discovery_order=0 is newest). Old rows default to 0 so
+    they all tie and fall back to MIN(id). Not perfect for repos with mixed
+    old+new insertions but the broad-and-wide use case dominates: brand new
+    repos hit the zero-prior-parses bucket and get the correct latest tag.
+
     Returns rows with `next_action` and `iteration_count` so the orchestrator
     can determine which phase to dispatch (Option B):
       - next_action IS NULL → fresh tag, dispatch phase=parse
@@ -176,19 +205,33 @@ def get_pending_tags(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.
       - next_action == "ast"/"enrich"/"combine" → dispatch that phase
       - next_action == "done" → shouldn't appear here (status would be complete)
     """
+    # Subquery: for each repo, pick the pending tag with lowest discovery_order
+    # (= newest per GitHub API). id as tiebreak for the zero-default case.
     return conn.execute(
-        """SELECT t.id, t.git_tag, t.commit_sha,
-                  t.next_action, t.iteration_count, t.current_phase,
-                  r.full_name, r.storage_repo, r.org, r.name
-           FROM tags t
-           JOIN repos r ON t.repo_id = r.id
-           WHERE t.status = 'pending'
-             AND r.id NOT IN (
-               SELECT DISTINCT repo_id FROM tags WHERE status IN ('dispatched', 'parsing')
-             )
-           GROUP BY r.id
-           HAVING t.id = MIN(t.id)
-           ORDER BY r.priority DESC, r.id
+        """WITH ranked AS (
+             SELECT t.id, t.git_tag, t.commit_sha,
+                    t.next_action, t.iteration_count, t.current_phase,
+                    r.id AS repo_id, r.full_name, r.storage_repo, r.org, r.name, r.priority,
+                    (SELECT COUNT(*) FROM tags WHERE repo_id = r.id AND status = 'complete') AS complete_count,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY r.id
+                      ORDER BY t.discovery_order ASC, t.id DESC
+                    ) AS rn
+             FROM tags t
+             JOIN repos r ON t.repo_id = r.id
+             WHERE t.status = 'pending'
+               AND r.id NOT IN (
+                 SELECT DISTINCT repo_id FROM tags WHERE status IN ('dispatched', 'parsing')
+               )
+           )
+           SELECT id, git_tag, commit_sha, next_action, iteration_count, current_phase,
+                  full_name, storage_repo, org, name, complete_count
+           FROM ranked
+           WHERE rn = 1
+           ORDER BY
+             CASE WHEN complete_count = 0 THEN 0 ELSE 1 END,
+             priority DESC,
+             repo_id
            LIMIT ?""",
         (limit,),
     ).fetchall()

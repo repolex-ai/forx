@@ -172,11 +172,12 @@ def parse(ctx, repo):
 @cli.command()
 @click.option("--max-concurrent", "-j", default=dispatch.MAX_CONCURRENT, help="Max parallel jobs")
 @click.option("--poll-interval", "-p", default=dispatch.POLL_INTERVAL, help="Seconds between polls")
+@click.option("--spider-every", default=30, show_default=True, help="Run dep spider every N poll cycles (0 to disable)")
 @click.pass_context
-def run(ctx, max_concurrent, poll_interval):
+def run(ctx, max_concurrent, poll_interval, spider_every):
     """Start the orchestrator. Dispatches and monitors parse jobs."""
     conn = ctx.obj["conn"]
-    orchestrate.run_loop(conn, max_concurrent, poll_interval)
+    orchestrate.run_loop(conn, max_concurrent, poll_interval, spider_every)
 
 
 @cli.command()
@@ -405,3 +406,86 @@ def crawl(ctx):
     """
     conn = ctx.obj["conn"]
     spider.spider_all(conn)
+
+
+@cli.command()
+@click.argument("repo", required=False)
+@click.option("--all-pending", is_flag=True, help="Re-discover all repos with any pending tags")
+@click.option("--zero-only", is_flag=True, help="Only re-discover repos with zero complete tags")
+@click.pass_context
+def rediscover(ctx, repo, all_pending, zero_only):
+    """Re-run tag discovery for a repo to backfill discovery_order.
+
+    Drops all pending (not complete, not dispatched, not failed) tag rows
+    for the repo and re-inserts them via discover.get_git_tags. Complete/failed
+    tags are preserved. Newly inserted rows get proper discovery_order values
+    so get_pending_tags can pick the latest tag correctly.
+
+    Examples:
+        forx rediscover psf/black
+        forx rediscover --all-pending
+        forx rediscover --zero-only
+    """
+    conn = ctx.obj["conn"]
+
+    if repo:
+        targets = [repo]
+    elif all_pending:
+        targets = [
+            r["full_name"] for r in conn.execute(
+                """SELECT DISTINCT r.full_name FROM repos r
+                   JOIN tags t ON t.repo_id = r.id
+                   WHERE t.status = 'pending'
+                   ORDER BY r.full_name"""
+            ).fetchall()
+        ]
+    elif zero_only:
+        targets = [
+            r["full_name"] for r in conn.execute(
+                """SELECT r.full_name FROM repos r
+                   WHERE (SELECT COUNT(*) FROM tags WHERE repo_id = r.id AND status = 'complete') = 0
+                     AND (SELECT COUNT(*) FROM tags WHERE repo_id = r.id AND status = 'pending') > 0
+                   ORDER BY r.full_name"""
+            ).fetchall()
+        ]
+    else:
+        console.print("[red]Specify a repo, --all-pending, or --zero-only[/]")
+        return
+
+    console.print(f"[bold]Re-discovering {len(targets)} repo(s)...[/]")
+    total_added = 0
+    for i, full_name in enumerate(targets, 1):
+        row = conn.execute("SELECT id FROM repos WHERE full_name = ?", (full_name,)).fetchone()
+        if not row:
+            console.print(f"  [yellow]{i}/{len(targets)} {full_name} not tracked[/]")
+            continue
+        repo_id = row["id"]
+
+        try:
+            tags = discover.discover_repo(full_name)
+        except Exception as e:
+            console.print(f"  [red]{i}/{len(targets)} {full_name} failed: {e}[/]")
+            continue
+
+        if not tags:
+            console.print(f"  [dim]{i}/{len(targets)} {full_name} no tags[/]")
+            continue
+
+        # Drop only pending tag rows; preserve complete/failed/dispatched
+        conn.execute(
+            "DELETE FROM tags WHERE repo_id = ? AND status = 'pending'",
+            (repo_id,),
+        )
+        conn.commit()
+
+        # Re-insert — add_tags populates discovery_order from list index
+        db.add_tags(conn, repo_id, tags)
+
+        pending_after = conn.execute(
+            "SELECT COUNT(*) FROM tags WHERE repo_id = ? AND status = 'pending'",
+            (repo_id,),
+        ).fetchone()[0]
+        console.print(f"  [green]{i}/{len(targets)} {full_name}[/] [dim]({pending_after} pending)[/]")
+        total_added += pending_after
+
+    console.print(f"\n[bold green]Re-discovered {len(targets)} repos, {total_added} pending tags total[/]")

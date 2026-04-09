@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from rich.console import Console
 from rich.table import Table
 
-from . import db, dispatch, index
+from . import db, dispatch, index, spider
 
 console = Console()
 
@@ -257,10 +257,19 @@ def print_status(conn):
     console.print(table)
 
 
-def run_loop(conn, max_concurrent: int = dispatch.MAX_CONCURRENT, poll_interval: int = dispatch.POLL_INTERVAL):
+def run_loop(
+    conn,
+    max_concurrent: int = dispatch.MAX_CONCURRENT,
+    poll_interval: int = dispatch.POLL_INTERVAL,
+    spider_every: int = 30,
+):
     """
     Main orchestration loop.
     Keeps slots filled and monitors via manifest checks (no API polling).
+
+    spider_every: run dependency spider every N poll cycles (0 to disable).
+    Crawling in-loop keeps the pending queue full of newly-discovered deps,
+    which is what we want for broad-and-wide dependency network coverage.
     """
     console.print("[bold]Starting forx orchestrator[/]")
     print_status(conn)
@@ -270,7 +279,10 @@ def run_loop(conn, max_concurrent: int = dispatch.MAX_CONCURRENT, poll_interval:
     if reset_count:
         console.print(f"[yellow]Reset {reset_count} stale dispatched jobs[/]")
 
+    cycle = 0
     while True:
+        cycle += 1
+
         # Check completed runs via manifest
         completed, failed = check_running(conn)
         if completed or failed:
@@ -291,6 +303,17 @@ def run_loop(conn, max_concurrent: int = dispatch.MAX_CONCURRENT, poll_interval:
         dispatched = fill_slots(conn, max_concurrent)
         if dispatched:
             console.print(f"  [dim]Dispatched {dispatched} new jobs[/]")
+
+        # Periodic spider — queue newly-discovered deps while we run.
+        # The spider skips repos already in the db, so re-runs are cheap.
+        if spider_every and cycle % spider_every == 0:
+            try:
+                console.print(f"  [dim cyan]Spidering deps (cycle {cycle})...[/]")
+                added = spider.spider_all(conn)
+                if added:
+                    console.print(f"  [cyan]Spider added {added} new repos[/]")
+            except Exception as e:
+                console.print(f"  [dim yellow]Spider error: {e}[/]")
 
         # Check if we're done
         stats = db.get_stats(conn)

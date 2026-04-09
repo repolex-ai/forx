@@ -5,7 +5,35 @@ import subprocess
 
 
 def get_git_tags(repo_full_name: str) -> list[str]:
-    """Get all tags from a GitHub repo using git ls-remote (no clone needed)."""
+    """
+    Get all tags from a GitHub repo via the GitHub API.
+
+    Returns tags in the order GitHub's tags API returns them: newest first
+    (reverse chronological by tag creation). This ordering is load-bearing —
+    the orchestrator uses MAX(tags.id) per repo to pick the "latest" tag,
+    which relies on tags being inserted in newest-first order so the highest
+    id corresponds to the most recent tag.
+
+    Falls back to `git ls-remote --tags` (alphabetical ordering, historically
+    wrong for latest-tag selection) if the API call fails.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "gh", "api", "--paginate",
+                f"/repos/{repo_full_name}/tags",
+                "--jq", ".[] | .name",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return [line for line in result.stdout.strip().split("\n") if line]
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Fallback: git ls-remote (alphabetical, wrong order for latest-tag)
     result = subprocess.run(
         ["git", "ls-remote", "--tags", f"https://github.com/{repo_full_name}.git"],
         capture_output=True,
@@ -19,8 +47,6 @@ def get_git_tags(repo_full_name: str) -> list[str]:
     for line in result.stdout.strip().split("\n"):
         if not line:
             continue
-        # Format: <sha>\trefs/tags/<tagname>
-        # Skip ^{} dereferenced tags
         ref = line.split("\t", 1)[1]
         if ref.endswith("^{}"):
             continue
