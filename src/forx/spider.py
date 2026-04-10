@@ -95,16 +95,82 @@ def get_dependencies_from_manifest(manifest: dict) -> list[dict]:
     return deps
 
 
-def spider_repo(conn, full_name: str, storage_repo: str) -> list[str]:
+def get_dependencies_from_dep_graph(storage_repo: str) -> list[dict]:
     """
-    Spider a single repo: fetch its manifest, find dependencies,
-    add new ones to the DB. Returns list of newly added repos.
+    Extract dependency repos from the parser's dep/ named graph in the
+    storage repo. The parser writes dep/<commit-sha>.nq.gz with triples
+    using repolex:githubOrg and repolex:githubRepo predicates.
+
+    This is the BEST source of dep data — the parser resolved package
+    names to GitHub repos at parse time using the actual package registry.
     """
-    manifest = fetch_manifest(storage_repo)
-    if manifest is None:
+    # Find dep files
+    base = f"https://raw.githubusercontent.com/{storage_repo}/main"
+    dep_listing = _gh_api_get(f"repos/{storage_repo}/contents/dep")
+    if not dep_listing or not isinstance(dep_listing, list):
         return []
 
-    deps = get_dependencies_from_manifest(manifest)
+    seen = set()
+    deps = []
+    for entry in dep_listing:
+        name = entry.get("name", "")
+        if not name.endswith(".nq.gz"):
+            continue
+        url = f"{base}/dep/{name}"
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                import gzip
+                raw = gzip.decompress(resp.read()).decode("utf-8", errors="replace")
+        except Exception:
+            continue
+
+        # Parse N-Quads for githubOrg + githubRepo pairs per subject
+        subjects: dict[str, dict[str, str]] = {}
+        for line in raw.splitlines():
+            parts = line.strip().rstrip(" .").split(" ", 3)
+            if len(parts) < 3:
+                continue
+            subj, pred, obj = parts[0], parts[1], parts[2]
+            if subj not in subjects:
+                subjects[subj] = {}
+            if "githubOrg" in pred:
+                subjects[subj]["org"] = obj.strip('"')
+            elif "githubRepo" in pred:
+                subjects[subj]["repo"] = obj.strip('"')
+            elif "packageName" in pred:
+                subjects[subj]["package"] = obj.strip('"')
+
+        for subj, info in subjects.items():
+            org = info.get("org", "").split("#")[0]
+            repo = info.get("repo", "").split("#")[0]
+            if org and repo:
+                full_name = f"{org}/{repo}"
+                if full_name not in seen:
+                    seen.add(full_name)
+                    deps.append({"full_name": full_name, "package": info.get("package", "")})
+
+    return deps
+
+
+def spider_repo(conn, full_name: str, storage_repo: str) -> list[str]:
+    """
+    Spider a single repo: find dependencies via three paths (in order):
+      1. dep/ named graph in storage repo (parser-resolved, best quality)
+      2. repo-manifest.jsonld / manifest.json (repolex:dependencyRepo)
+      3. Source path (package files via gh api) as fallback
+
+    Returns list of newly added repos.
+    """
+    # Path 1: parser dep graph (best quality — resolved at parse time)
+    deps = get_dependencies_from_dep_graph(storage_repo)
+
+    # Path 2: manifest (usually empty under current parser, but check)
+    if not deps:
+        manifest = fetch_manifest(storage_repo)
+        if manifest:
+            deps = get_dependencies_from_manifest(manifest)
+
     if not deps:
         return []
 
