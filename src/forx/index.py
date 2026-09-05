@@ -67,11 +67,16 @@ def sync_repo(full_name: str, storage_repo: str, index_path: Path) -> bool:
             continue
 
         commit_file = commits_dir / f"commit-manifest-{sha}.jsonld"
+        existing_cm = None
         if commit_file.exists():
-            continue
+            try:
+                with open(commit_file) as f:
+                    existing_cm = json.load(f)
+            except json.JSONDecodeError:
+                existing_cm = None
 
         commit_manifest = fetch_json(storage_repo, f"manifests/commit-manifest-{sha}.jsonld")
-        if commit_manifest:
+        if commit_manifest and commit_manifest != existing_cm:
             with open(commit_file, "w") as f:
                 json.dump(commit_manifest, f, indent=2)
                 f.write("\n")
