@@ -155,6 +155,8 @@ def get_run_logs(run_id: str) -> str:
 def read_next_action(storage_repo: str) -> dict | None:
     """
     Read aggregate/.next-action.json from a storage repo.
+    Uses gh api to avoid Fastly CDN caching on raw.githubusercontent.com,
+    falling back to raw HTTP if needed.
 
     Returns parsed JSON dict with at least:
       - next_action: 'parse' | 'ast' | 'enrich' | 'combine' | 'done'
@@ -163,6 +165,17 @@ def read_next_action(storage_repo: str) -> dict | None:
 
     Returns None if the file doesn't exist (parser bug or fresh tag).
     """
+    import base64
+    try:
+        result = gh_run(
+            ["api", f"repos/{storage_repo}/contents/aggregate/.next-action.json", "--jq", ".content"],
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            content = base64.b64decode(result.stdout.strip()).decode()
+            return json.loads(content)
+    except Exception:
+        pass
     return fetch_json(storage_repo, "aggregate/.next-action.json")
 
 
