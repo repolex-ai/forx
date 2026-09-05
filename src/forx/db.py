@@ -10,7 +10,7 @@ DEFAULT_DB_PATH = Path.home() / ".forx" / "forx.db"
 # Bump this when repolex-parser-py gets a new release that
 # changes output format. Tags parsed with an older version
 # can be invalidated with `forx reparse`.
-PARSER_VERSION = "ebf06f7f2a1bcbef697e56130cdbd6d29b8e863f"
+PARSER_VERSION = "72b32e4c3d4bf505c37c996ffb832dc3cf6e401c"
 
 MIGRATIONS = [
     # v1: initial schema
