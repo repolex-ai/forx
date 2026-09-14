@@ -165,13 +165,12 @@ def update_profile_readme(index_path: Path):
     # Build table rows
     rows = []
     for p in latest:
-        source = f"[{p['full_name']}](https://github.com/{p['full_name']})"
+        data_source = f"[{p['full_name']}](https://github.com/{p['storage_repo']})"
         tag = p["tag"] or f"`{p['sha']}`"
-        data = f"[view](https://github.com/{p['storage_repo']})"
         date = p["parsed_at"][:10] if p["parsed_at"] else ""
-        rows.append(f"| {source} | {tag} | {data} | {date} |")
+        rows.append(f"| {data_source} | {tag} | {date} |")
 
-    table_content = "\n".join(rows) if rows else "| *No repos parsed yet* | | | |"
+    table_content = "\n".join(rows) if rows else "| *No repos parsed yet* | | |"
 
     # Read and update README
     readme = readme_file.read_text()
@@ -181,7 +180,7 @@ def update_profile_readme(index_path: Path):
     if start_marker in readme and end_marker in readme:
         before = readme.split(start_marker)[0]
         after = readme.split(end_marker)[1]
-        new_readme = f"{before}{start_marker}\n| Source | Tag | Data | Parsed |\n|--------|-----|------|--------|\n{table_content}\n{end_marker}{after}"
+        new_readme = f"{before}{start_marker}\n| Data Source | Tag | Parsed |\n|-------------|-----|--------|\n{table_content}\n{end_marker}{after}"
 
         if new_readme != readme:
             readme_file.write_text(new_readme)
