@@ -229,8 +229,8 @@ def get_pending_tags(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.
            FROM ranked
            WHERE rn = 1
            ORDER BY
-             CASE WHEN complete_count = 0 THEN 0 ELSE 1 END,
              priority DESC,
+             CASE WHEN complete_count = 0 THEN 0 ELSE 1 END,
              repo_id
            LIMIT ?""",
         (limit,),
