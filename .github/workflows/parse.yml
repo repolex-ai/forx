@@ -240,9 +240,11 @@ jobs:
           cd ${{ github.workspace }}/storage
           git add -A
           if ! git diff --staged --quiet; then
-            git pull --rebase origin main || true
             git commit -m "Phase ${{ inputs.phase }} for ${{ inputs.repo }}@${{ inputs.tag }} (${{ env.COMMIT_SHA }})"
-            git push
+            for attempt in 1 2 3 4 5; do
+              git pull --rebase origin main || true
+              git push && break || sleep 2
+            done
           else
             echo "No storage changes to commit for phase ${{ inputs.phase }}"
           fi
@@ -369,7 +371,9 @@ jobs:
 
           git add README.md index.json
           if ! git diff --staged --quiet; then
-            git pull --rebase origin main || true
             git commit -m "Update README and index for ${{ inputs.repo }}@${{ inputs.tag }}"
-            git push
+            for attempt in 1 2 3 4 5; do
+              git pull --rebase origin main || true
+              git push && break || sleep 2
+            done
           fi
