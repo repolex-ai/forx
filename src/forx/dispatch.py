@@ -1,10 +1,11 @@
 """Dispatch and monitor GitHub Actions workflow runs."""
 
+import base64
 import json
 import subprocess
 import time
-import urllib.request
 import urllib.error
+import urllib.request
 
 
 from .db import PARSER_VERSION
@@ -86,9 +87,22 @@ def dispatch_workflow(
 
 def fetch_json(storage_repo: str, path: str) -> dict | None:
     """
-    Fetch a JSON file from a storage repo via raw HTTP (no API auth needed).
+    Fetch a JSON file from a storage repo.
+    Tries `gh api` first to bypass Fastly CDN caching on raw.githubusercontent.com,
+    falling back to raw HTTP if gh CLI is unavailable or fails.
     Returns parsed JSON or None if not found.
     """
+    try:
+        result = gh_run(
+            ["api", f"repos/{storage_repo}/contents/{path}", "--jq", ".content"],
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            content = base64.b64decode(result.stdout.strip()).decode()
+            return json.loads(content)
+    except Exception:
+        pass
+
     url = f"https://raw.githubusercontent.com/{storage_repo}/main/{path}"
     try:
         req = urllib.request.Request(url)
@@ -155,8 +169,7 @@ def get_run_logs(run_id: str) -> str:
 def read_next_action(storage_repo: str) -> dict | None:
     """
     Read aggregate/.next-action.json from a storage repo.
-    Uses gh api to avoid Fastly CDN caching on raw.githubusercontent.com,
-    falling back to raw HTTP if needed.
+    Uses fetch_json (which tries gh api first to avoid CDN caching).
 
     Returns parsed JSON dict with at least:
       - next_action: 'parse' | 'ast' | 'enrich' | 'combine' | 'done'
@@ -165,17 +178,6 @@ def read_next_action(storage_repo: str) -> dict | None:
 
     Returns None if the file doesn't exist (parser bug or fresh tag).
     """
-    import base64
-    try:
-        result = gh_run(
-            ["api", f"repos/{storage_repo}/contents/aggregate/.next-action.json", "--jq", ".content"],
-            check=False,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            content = base64.b64decode(result.stdout.strip()).decode()
-            return json.loads(content)
-    except Exception:
-        pass
     return fetch_json(storage_repo, "aggregate/.next-action.json")
 
 

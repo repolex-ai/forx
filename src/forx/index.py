@@ -59,7 +59,7 @@ def sync_repo(full_name: str, storage_repo: str, index_path: Path) -> bool:
     commits_dir.mkdir(parents=True, exist_ok=True)
 
     for commit in repo_manifest.get("repolex:trackedCommit", []):
-        if commit.get("repolex:parseStatus") != "parsed":
+        if commit.get("repolex:parseStatus") not in ("parsed", "ast_complete", "enrich_complete"):
             continue
 
         sha = commit.get("git:hexsha", "")
@@ -85,7 +85,7 @@ def sync_repo(full_name: str, storage_repo: str, index_path: Path) -> bool:
     return updated
 
 
-def sync_all(conn, index_path: Path | None = None) -> int:  # noqa: conn used for DB query
+def sync_all(conn, index_path: Path | None = None) -> int:
     """
     Sync all parsed repos into the forx-index.
     Returns count of repos updated.
@@ -220,6 +220,11 @@ def push_index(index_path: Path | None = None, message: str = "Update index"):
         ["git", "commit", "-m", message],
         cwd=index_path,
         check=True,
+    )
+    subprocess.run(
+        ["git", "pull", "--rebase"],
+        cwd=index_path,
+        check=False,
     )
     subprocess.run(
         ["git", "push"],

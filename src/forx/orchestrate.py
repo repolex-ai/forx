@@ -111,6 +111,7 @@ def check_running(conn) -> tuple[int, int]:
     completed_count = 0
     failed_count = 0
     now = datetime.now(timezone.utc)
+    synced_repos: set[str] = set()
 
     for tag_row in active:
         storage_repo = tag_row["storage_repo"]
@@ -189,6 +190,14 @@ def check_running(conn) -> tuple[int, int]:
                     f"[dim](done after phase={phase_completed})[/]"
                 )
                 completed_count += 1
+
+                # Sync repo manifests atomically to forx-index
+                try:
+                    idx_path = index.get_index_path()
+                    if index.sync_repo(full_name, storage_repo, idx_path):
+                        synced_repos.add(full_name)
+                except Exception as e:
+                    console.print(f"  [dim yellow]Index sync ({full_name}): {e}[/]")
             else:
                 # next_action says done but manifest doesn't agree — flag loudly
                 db.mark_failed(
@@ -212,6 +221,14 @@ def check_running(conn) -> tuple[int, int]:
                 f"[dim](phase {phase_completed} done, next: {next_action})[/]"
             )
 
+            # Sync repo manifests atomically to forx-index
+            try:
+                idx_path = index.get_index_path()
+                if index.sync_repo(full_name, storage_repo, idx_path):
+                    synced_repos.add(full_name)
+            except Exception as e:
+                console.print(f"  [dim yellow]Index sync ({full_name}): {e}[/]")
+
         else:
             db.mark_failed(
                 conn,
@@ -223,6 +240,19 @@ def check_running(conn) -> tuple[int, int]:
                 f"[dim](invalid next_action: {next_action!r})[/]"
             )
             failed_count += 1
+
+    # If any repos were updated in forx-index during this cycle, push the index
+    if synced_repos:
+        try:
+            idx_path = index.get_index_path()
+            index.push_index(
+                idx_path,
+                message=f"Sync {', '.join(sorted(synced_repos))}",
+            )
+            if completed_count > 0:
+                index.update_profile_readme(idx_path)
+        except Exception as e:
+            console.print(f"  [dim yellow]Index push: {e}[/]")
 
     return completed_count, failed_count
 
@@ -289,17 +319,6 @@ def run_loop(
         completed, failed = check_running(conn)
         if completed or failed:
             console.print(f"  [dim]Batch: {completed} complete, {failed} failed[/]")
-
-            # Sync index and update profile when parses complete
-            if completed > 0:
-                try:
-                    index_path = index.get_index_path()
-                    updated = index.sync_all(conn, index_path)
-                    if updated:
-                        index.push_index(index_path, message=f"Sync {updated} repos")
-                        index.update_profile_readme(index_path)
-                except Exception as e:
-                    console.print(f"  [dim yellow]Index sync: {e}[/]")
 
         # Fill available slots
         dispatched = fill_slots(conn, max_concurrent)

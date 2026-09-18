@@ -41,11 +41,11 @@ def add(ctx, repos, head):
         repo_id = db.add_repo(conn, repo, head_only=head)
 
         if head:
-            console.print(f"  [green]Added as HEAD-only (will parse default branch)[/]")
+            console.print("  [green]Added as HEAD-only (will parse default branch)[/]")
             continue
 
         # Discover all tags
-        console.print(f"  Discovering tags...", end=" ")
+        console.print("  Discovering tags...", end=" ")
         try:
             tags = discover.discover_repo(repo)
         except Exception as e:
