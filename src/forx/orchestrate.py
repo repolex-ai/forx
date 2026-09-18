@@ -233,6 +233,8 @@ def _is_stale(dispatched_at: str | None, now: datetime) -> bool:
         return False
     try:
         dispatched_time = datetime.fromisoformat(dispatched_at)
+        if dispatched_time.tzinfo is None:
+            dispatched_time = dispatched_time.replace(tzinfo=timezone.utc)
     except (ValueError, TypeError):
         return False
     elapsed = (now - dispatched_time).total_seconds()
