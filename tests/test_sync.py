@@ -90,12 +90,13 @@ class TestOrchestrateReconcilerSync(unittest.TestCase):
         with patch("forx.dispatch.read_next_action", return_value={
             "next_action": "enrich",
             "phase_completed": "ast",
+            "commit_sha": "abc1234",
         }):
             completed, failed = check_running(conn)
 
             self.assertEqual(completed, 0)
             self.assertEqual(failed, 0)
-            mock_update_next.assert_called_once_with(conn, 1, "enrich")
+            mock_update_next.assert_called_once_with(conn, 1, "enrich", commit_sha="abc1234")
             mock_reset.assert_called_once_with(conn, 1)
             mock_sync_repo.assert_called_once()
             mock_push_index.assert_called_once()
@@ -135,12 +136,19 @@ class TestOrchestrateReconcilerSync(unittest.TestCase):
         with patch("forx.dispatch.read_next_action", return_value={
             "next_action": "done",
             "phase_completed": "combine",
+            "commit_sha": "fedcba98",
         }):
             completed, failed = check_running(conn)
 
             self.assertEqual(completed, 1)
             self.assertEqual(failed, 0)
-            mock_mark_complete.assert_called_once_with(conn, 2)
+            mock_check_manifest.assert_called_once_with(
+                "repolex-forx/test-org--test-repo",
+                "v1.0.0",
+                "2026-09-18T00:00:00+00:00",
+                commit_sha="fedcba98",
+            )
+            mock_mark_complete.assert_called_once_with(conn, 2, commit_sha="fedcba98")
             mock_sync_repo.assert_called_once()
             mock_push_index.assert_called_once()
             mock_update_readme.assert_called_once()

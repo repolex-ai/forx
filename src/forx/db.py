@@ -48,14 +48,20 @@ MIGRATIONS = [
 ]
 
 
-def get_db(db_path: Path | None = None) -> sqlite3.Connection:
+def get_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     """Get a database connection, creating schema if needed."""
-    path = db_path or DEFAULT_DB_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if db_path is None:
+        path = DEFAULT_DB_PATH
+    else:
+        path = Path(db_path)
+
+    if str(path) != ":memory:":
+        path.parent.mkdir(parents=True, exist_ok=True)
 
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    if str(path) != ":memory:":
+        conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
 
     # Check if we need to migrate (fresh DB or old schema)
@@ -240,7 +246,7 @@ def get_pending_tags(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.
 def get_dispatched_tags(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Get tags currently dispatched/parsing."""
     return conn.execute(
-        """SELECT t.id, t.git_tag, t.workflow_run_id, t.dispatched_at,
+        """SELECT t.id, t.git_tag, t.commit_sha, t.workflow_run_id, t.dispatched_at,
                   t.current_phase, t.iteration_count, t.next_action,
                   r.full_name, r.storage_repo
            FROM tags t
@@ -268,12 +274,23 @@ def mark_dispatched(conn: sqlite3.Connection, tag_id: int, run_id: str, phase: s
     conn.commit()
 
 
-def update_next_action(conn: sqlite3.Connection, tag_id: int, next_action: str):
+def update_next_action(
+    conn: sqlite3.Connection,
+    tag_id: int,
+    next_action: str,
+    commit_sha: str | None = None,
+):
     """Record the next_action value read from .next-action.json after a phase completed."""
-    conn.execute(
-        "UPDATE tags SET next_action = ? WHERE id = ?",
-        (next_action, tag_id),
-    )
+    if commit_sha:
+        conn.execute(
+            "UPDATE tags SET next_action = ?, commit_sha = COALESCE(?, commit_sha) WHERE id = ?",
+            (next_action, commit_sha, tag_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE tags SET next_action = ? WHERE id = ?",
+            (next_action, tag_id),
+        )
     conn.commit()
 
 

@@ -65,6 +65,15 @@ def fill_slots(conn, max_concurrent: int = dispatch.MAX_CONCURRENT):
 
         phase = _next_phase_for_tag(tag_row)
 
+        if phase == "enrich":
+            commit_sha = tag_row["commit_sha"] if "commit_sha" in tag_row.keys() else None
+            if commit_sha and not dispatch.check_ast_chunks_exist(tag_row["storage_repo"], commit_sha):
+                console.print(
+                    f"  [yellow]⚠[/] {tag_row['full_name']}@{tag_row['git_tag']} "
+                    f"[dim]AST chunks missing for {commit_sha[:8]} — falling back to phase=ast[/]"
+                )
+                phase = "ast"
+
         try:
             console.print(
                 f"  [cyan]Dispatching[/] {tag_row['full_name']}@{tag_row['git_tag']} "
@@ -179,12 +188,17 @@ def check_running(conn) -> tuple[int, int]:
 
         next_action = next_action_data.get("next_action", "")
         phase_completed = next_action_data.get("phase_completed", "")
+        commit_sha = next_action_data.get("commit_sha") or (
+            tag_row["commit_sha"] if "commit_sha" in tag_row.keys() else None
+        )
 
         if next_action == dispatch.TERMINAL_ACTION:
             # Verify with manifest as defense in depth
-            manifest_result = dispatch.check_manifest_for_tag(storage_repo, git_tag, dispatched_at)
+            manifest_result = dispatch.check_manifest_for_tag(
+                storage_repo, git_tag, dispatched_at, commit_sha=commit_sha
+            )
             if manifest_result == "success":
-                db.mark_complete(conn, tag_row["id"])
+                db.mark_complete(conn, tag_row["id"], commit_sha=commit_sha)
                 console.print(
                     f"  [green]✓[/] {full_name}@{git_tag} "
                     f"[dim](done after phase={phase_completed})[/]"
@@ -214,7 +228,7 @@ def check_running(conn) -> tuple[int, int]:
         elif next_action in dispatch.VALID_PHASES:
             # Mid-pipeline — record the next action and reset to pending
             # so fill_slots will dispatch the next phase next round.
-            db.update_next_action(conn, tag_row["id"], next_action)
+            db.update_next_action(conn, tag_row["id"], next_action, commit_sha=commit_sha)
             db.reset_to_pending(conn, tag_row["id"])
             console.print(
                 f"  [yellow]→[/] {full_name}@{git_tag} "

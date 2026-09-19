@@ -115,30 +115,49 @@ def fetch_json(storage_repo: str, path: str) -> dict | None:
         return None
 
 
-def check_manifest_for_tag(storage_repo: str, git_tag: str, dispatched_at: str) -> str | None:
+def check_manifest_for_tag(
+    storage_repo: str,
+    git_tag: str,
+    dispatched_at: str = "",
+    commit_sha: str | None = None,
+) -> str | None:
     """
-    Check if a tag has been parsed by looking at repo-manifest.jsonld or manifest.json.
-    Returns 'success' if the tag appears as parsed.
+    Check if a tag has been parsed by looking at repo-manifest.jsonld,
+    individual commit manifest manifests/commit-manifest-{sha}.jsonld,
+    or legacy manifest.json.
+    Returns 'success' if the tag or commit appears as parsed.
 
-    Option B note: we no longer compare parsed_at against dispatched_at.
-    The manifest's parsed_at is written once during the cycle (typically by the
-    parse phase) so on the final combine-phase dispatch the compare would
-    false-negative because parsed_at < current phase's dispatched_at.
-    Instead we only verify the tag is recorded as parsed. The .next-action.json
-    saying next_action=done is the primary signal; this is defense in depth
-    against "next_action=done but parser never actually wrote the manifest."
-    The dispatched_at parameter is kept for backward compatibility but unused.
+    Supports commit SHA aliasing (forx#7): multiple tags frequently point to the
+    exact same commit SHA (e.g. fireworks v2.0.2–v2.0.9 or release candidate tags).
+    If the underlying commit is recorded as parsed, any tag pointing to that commit
+    is verified.
     """
     del dispatched_at  # unused under Option B — see docstring
     # Try repo-manifest.jsonld first (new JSON-LD format)
     repo_manifest = fetch_json(storage_repo, "repo-manifest.jsonld")
     if repo_manifest is not None:
-        for commit in repo_manifest.get("repolex:trackedCommit", []):
+        commits = repo_manifest.get("repolex:trackedCommit", [])
+        if isinstance(commits, dict):
+            commits = [commits]
+        for commit in commits:
             tag_name = commit.get("git:tagName", "")
+            hexsha = commit.get("git:hexsha", "")
             status = commit.get("repolex:parseStatus", "")
-            if tag_name == git_tag and status == "parsed":
+            if status == "parsed":
+                if tag_name == git_tag or (commit_sha and hexsha == commit_sha):
+                    return "success"
+        # If commit_sha is provided, also check if individual commit manifest exists and is parsed
+        if commit_sha:
+            cm = fetch_json(storage_repo, f"manifests/commit-manifest-{commit_sha}.jsonld")
+            if cm is not None and cm.get("repolex:parseStatus") == "parsed":
                 return "success"
         return None
+
+    # Fallback to checking individual commit manifest directly
+    if commit_sha:
+        cm = fetch_json(storage_repo, f"manifests/commit-manifest-{commit_sha}.jsonld")
+        if cm is not None and cm.get("repolex:parseStatus") == "parsed":
+            return "success"
 
     # Fallback to legacy manifest.json
     manifest = fetch_json(storage_repo, "manifest.json")
@@ -146,10 +165,44 @@ def check_manifest_for_tag(storage_repo: str, git_tag: str, dispatched_at: str) 
         return None
 
     for version in manifest.get("versions", []):
-        if version.get("tag") == git_tag:
+        tag_match = version.get("tag") == git_tag
+        sha_match = bool(commit_sha and version.get("sha") == commit_sha)
+        if tag_match or sha_match:
             return "success"
 
     return None
+
+
+def check_ast_chunks_exist(storage_repo: str, commit_sha: str) -> bool:
+    """
+    Check if AST aggregate chunks exist for a commit in the storage repo.
+    Prevents dispatching 'enrich' when AST chunks are missing (forx#7 item 2).
+    """
+    if not commit_sha:
+        return False
+
+    # Check directory contents via gh api
+    try:
+        result = gh_run(
+            ["api", f"repos/{storage_repo}/contents/aggregate/ast/{commit_sha}"],
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            items = json.loads(result.stdout)
+            if isinstance(items, list) and any(item.get("name", "").endswith(".nq.gz") for item in items):
+                return True
+    except Exception:
+        pass
+
+    # Direct raw probe fallback
+    url = f"https://raw.githubusercontent.com/{storage_repo}/main/aggregate/ast/{commit_sha}/chunk-001.nq.gz"
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        req.add_header("Cache-Control", "no-cache")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
 
 
 def get_run_logs(run_id: str) -> str:
