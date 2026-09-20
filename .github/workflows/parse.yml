@@ -68,7 +68,7 @@ jobs:
           git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ inputs.repo }}.git" /tmp/source
           cd /tmp/source
           git fetch --tags
-          git checkout ${{ inputs.tag }}
+          git checkout -f ${{ inputs.tag }}
           COMMIT_SHA=$(git rev-parse HEAD)
           echo "COMMIT_SHA=$COMMIT_SHA" >> $GITHUB_ENV
           echo "commit_sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
