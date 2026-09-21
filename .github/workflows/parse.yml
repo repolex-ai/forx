@@ -88,6 +88,10 @@ jobs:
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
           uv tool install "git+https://x-access-token:${GH_TOKEN}@github.com/repolex-ai/repolex-parser-py.git@${{ inputs.parser_ref }}"
+          TOOL_PY=$(uv tool run --tool repolex python -c "import sys; print(sys.executable)" 2>/dev/null || echo "")
+          if [ -n "$TOOL_PY" ]; then
+            uv pip install --python "$TOOL_PY" "git+https://x-access-token:${GH_TOKEN}@github.com/repolex-ai/repolex-parser-py.git@${{ inputs.parser_ref }}#subdirectory=crates/repolex_core_rs" || echo "repolex_core_rs not available for ref ${{ inputs.parser_ref }}, using pure-Python fallback"
+          fi
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Configure git auth
