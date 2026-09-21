@@ -74,6 +74,15 @@ def fill_slots(conn, max_concurrent: int = dispatch.MAX_CONCURRENT):
                 )
                 phase = "ast"
 
+        if phase == "ast":
+            commit_sha = tag_row["commit_sha"] if "commit_sha" in tag_row.keys() else None
+            if commit_sha and not dispatch.check_filetree_exists(tag_row["storage_repo"], commit_sha):
+                console.print(
+                    f"  [yellow]⚠[/] {tag_row['full_name']}@{tag_row['git_tag']} "
+                    f"[dim]Filetree missing for {commit_sha[:8]} — falling back to phase=parse[/]"
+                )
+                phase = "parse"
+
         try:
             console.print(
                 f"  [cyan]Dispatching[/] {tag_row['full_name']}@{tag_row['git_tag']} "

@@ -7,12 +7,14 @@ from forx.orchestrate import fill_slots
 class TestFillSlotsAstGate(unittest.TestCase):
     @patch("forx.db.mark_dispatched")
     @patch("forx.dispatch.dispatch_workflow", return_value="run_123")
+    @patch("forx.dispatch.check_filetree_exists", return_value=True)
     @patch("forx.dispatch.check_ast_chunks_exist")
     @patch("forx.db.get_pending_tags")
     def test_enrich_falls_back_to_ast_when_chunks_missing(
         self,
         mock_get_pending,
         mock_check_ast,
+        mock_check_filetree,
         mock_dispatch,
         mock_mark_dispatched,
     ):
@@ -81,7 +83,85 @@ class TestFillSlotsAstGate(unittest.TestCase):
             storage_repo="repolex-forx/org--repo",
             phase="enrich",
         )
-        mock_mark_dispatched.assert_called_once_with(conn, 11, "run_124", phase="enrich")
+    @patch("forx.db.mark_dispatched")
+    @patch("forx.dispatch.dispatch_workflow", return_value="run_125")
+    @patch("forx.dispatch.check_filetree_exists")
+    @patch("forx.db.get_pending_tags")
+    def test_ast_falls_back_to_parse_when_filetree_missing(
+        self,
+        mock_get_pending,
+        mock_check_filetree,
+        mock_dispatch,
+        mock_mark_dispatched,
+    ):
+        conn = MagicMock()
+        mock_get_pending.return_value = [
+            {
+                "id": 12,
+                "full_name": "org/repo",
+                "storage_repo": "repolex-forx/org--repo",
+                "git_tag": "v1.0.0",
+                "commit_sha": "sha12345678",
+                "next_action": "ast",
+                "iteration_count": 1,
+            }
+        ]
+        mock_check_filetree.return_value = False
+
+        dispatched = fill_slots(conn, max_concurrent=1)
+        self.assertEqual(dispatched, 1)
+
+        mock_check_filetree.assert_called_once_with("repolex-forx/org--repo", "sha12345678")
+        mock_dispatch.assert_called_once_with(
+            repo="org/repo",
+            tag="v1.0.0",
+            storage_repo="repolex-forx/org--repo",
+            phase="parse",
+        )
+        mock_mark_dispatched.assert_called_once_with(conn, 12, "run_125", phase="parse")
+
+    @patch("forx.db.mark_dispatched")
+    @patch("forx.dispatch.dispatch_workflow", return_value="run_126")
+    @patch("forx.dispatch.check_filetree_exists")
+    @patch("forx.dispatch.check_ast_chunks_exist")
+    @patch("forx.db.get_pending_tags")
+    def test_enrich_cascades_to_parse_when_both_missing(
+        self,
+        mock_get_pending,
+        mock_check_ast,
+        mock_check_filetree,
+        mock_dispatch,
+        mock_mark_dispatched,
+    ):
+        conn = MagicMock()
+        mock_get_pending.return_value = [
+            {
+                "id": 13,
+                "full_name": "org/repo",
+                "storage_repo": "repolex-forx/org--repo",
+                "git_tag": "v1.0.0",
+                "commit_sha": "sha12345678",
+                "next_action": "enrich",
+                "iteration_count": 1,
+            }
+        ]
+        # Both AST chunks and filetree are missing
+        mock_check_ast.return_value = False
+        mock_check_filetree.return_value = False
+
+        dispatched = fill_slots(conn, max_concurrent=1)
+        self.assertEqual(dispatched, 1)
+
+        mock_check_ast.assert_called_once_with("repolex-forx/org--repo", "sha12345678")
+        mock_check_filetree.assert_called_once_with("repolex-forx/org--repo", "sha12345678")
+        # Should cascade from enrich -> ast -> parse
+        mock_dispatch.assert_called_once_with(
+            repo="org/repo",
+            tag="v1.0.0",
+            storage_repo="repolex-forx/org--repo",
+            phase="parse",
+        )
+        mock_mark_dispatched.assert_called_once_with(conn, 13, "run_126", phase="parse")
 
 
 if __name__ == "__main__":

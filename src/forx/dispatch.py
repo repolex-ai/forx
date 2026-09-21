@@ -205,6 +205,36 @@ def check_ast_chunks_exist(storage_repo: str, commit_sha: str) -> bool:
         return False
 
 
+def check_filetree_exists(storage_repo: str, commit_sha: str) -> bool:
+    """
+    Check if filetree snapshot exists for a commit in the storage repo.
+    Prevents dispatching 'ast' when filetree is missing (psutil#v5.6.7 failure pattern).
+    """
+    if not commit_sha:
+        return False
+
+    # Check file existence via gh api
+    try:
+        result = gh_run(
+            ["api", f"repos/{storage_repo}/contents/filetree/{commit_sha}.nq.gz"],
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return True
+    except Exception:
+        pass
+
+    # Direct raw probe fallback
+    url = f"https://raw.githubusercontent.com/{storage_repo}/main/filetree/{commit_sha}.nq.gz"
+    try:
+        req = urllib.request.Request(url, method="HEAD")
+        req.add_header("Cache-Control", "no-cache")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
 def get_run_logs(run_id: str) -> str:
     """Get failed job logs for a run."""
     result = gh_run(

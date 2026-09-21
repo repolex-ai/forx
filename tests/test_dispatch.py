@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from forx.dispatch import check_ast_chunks_exist, check_manifest_for_tag
+from forx.dispatch import check_ast_chunks_exist, check_filetree_exists, check_manifest_for_tag
 
 
 class TestCheckManifestForTag(unittest.TestCase):
@@ -131,6 +131,43 @@ class TestCheckAstChunksExist(unittest.TestCase):
 
     def test_empty_commit_sha_returns_false(self):
         self.assertFalse(check_ast_chunks_exist("repolex-forx/org--repo", ""))
+
+
+class TestCheckFiletreeExists(unittest.TestCase):
+    @patch("forx.dispatch.gh_run")
+    def test_filetree_exists_via_gh_api(self, mock_gh):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = '{"name": "sha12345.nq.gz", "type": "file"}'
+        mock_gh.return_value = mock_proc
+
+        self.assertTrue(check_filetree_exists("repolex-forx/org--repo", "sha12345"))
+
+    @patch("urllib.request.urlopen")
+    @patch("forx.dispatch.gh_run")
+    def test_filetree_exists_via_http_head_fallback(self, mock_gh, mock_urlopen):
+        mock_gh.side_effect = Exception("gh not available")
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_urlopen.return_value.__enter__.return_value = mock_resp
+
+        self.assertTrue(check_filetree_exists("repolex-forx/org--repo", "sha12345"))
+
+    @patch("urllib.request.urlopen")
+    @patch("forx.dispatch.gh_run")
+    def test_filetree_missing_returns_false(self, mock_gh, mock_urlopen):
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+        mock_proc.stdout = ""
+        mock_gh.return_value = mock_proc
+
+        mock_urlopen.side_effect = Exception("404 Not Found")
+
+        self.assertFalse(check_filetree_exists("repolex-forx/org--repo", "sha12345"))
+
+    def test_empty_commit_sha_returns_false(self):
+        self.assertFalse(check_filetree_exists("repolex-forx/org--repo", ""))
 
 
 if __name__ == "__main__":

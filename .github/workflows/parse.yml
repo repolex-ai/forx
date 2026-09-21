@@ -242,7 +242,9 @@ jobs:
           if ! git diff --staged --quiet; then
             git commit -m "Phase ${{ inputs.phase }} for ${{ inputs.repo }}@${{ inputs.tag }} (${{ env.COMMIT_SHA }})"
             for attempt in 1 2 3 4 5; do
-              git pull --rebase origin main || true
+              if ! git pull --rebase -X theirs origin main; then
+                git rebase --abort 2>/dev/null || true
+              fi
               git push && break || sleep 2
             done
           else
@@ -353,14 +355,17 @@ jobs:
           import json, os, glob
           org_repo = '${{ inputs.repo }}'.split('/')
           versions = []
-          for path in sorted(glob.glob('manifests/*.json')):
-              with open(path) as f:
-                  m = json.load(f)
-              versions.append({
-                  'commit': m.get('commit', ''),
-                  'tag': m.get('tag', ''),
-                  'parsed_at': m.get('parsed_at', ''),
-              })
+          for path in sorted(glob.glob('manifests/*.json*')):
+              try:
+                  with open(path) as f:
+                      m = json.load(f)
+                  versions.append({
+                      'commit': m.get('commit', '') or m.get('git:hexsha', ''),
+                      'tag': m.get('tag', '') or m.get('git:tagName', ''),
+                      'parsed_at': m.get('parsed_at', '') or m.get('repolex:parsedAt', ''),
+                  })
+              except Exception as e:
+                  print(f'Warning: Failed to load {path}: {e}')
           versions.sort(key=lambda v: v.get('parsed_at', ''), reverse=True)
           index = {'org': org_repo[0], 'repo': org_repo[1], 'versions': versions}
           with open('index.json', 'w') as f:
@@ -373,7 +378,9 @@ jobs:
           if ! git diff --staged --quiet; then
             git commit -m "Update README and index for ${{ inputs.repo }}@${{ inputs.tag }}"
             for attempt in 1 2 3 4 5; do
-              git pull --rebase origin main || true
+              if ! git pull --rebase -X theirs origin main; then
+                git rebase --abort 2>/dev/null || true
+              fi
               git push && break || sleep 2
             done
           fi
