@@ -27,6 +27,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout forx repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.REPOLEX_PAT }}
+
       # ============================================================
       # SETUP — runs for every dispatch (~3-5 min total)
       # ============================================================
@@ -388,3 +393,18 @@ jobs:
               git push && break || sleep 2
             done
           fi
+
+      # ============================================================
+      # AUDIT COMMENT DISPATCH — combine phase only
+      # ============================================================
+
+      - name: Post rlex audit comment (combine phase only)
+        if: inputs.phase == 'combine'
+        env:
+          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
+        run: |
+          uv run --with pyoxigraph python3 ${{ github.workspace }}/tools/post_audit_comment.py \
+            --repo "${{ inputs.repo }}" \
+            --commit "${{ env.COMMIT_SHA }}" \
+            --storage "${{ github.workspace }}/storage" \
+            --comment || echo "Audit comment failed or skipped"
