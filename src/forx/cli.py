@@ -1,10 +1,13 @@
 """forx CLI - orchestrate repolex-forx parsing."""
 
+import json
+from pathlib import Path
+
 import click
 from rich.console import Console
 from rich.table import Table
 
-from . import db, discover, dispatch, index, orchestrate, spider
+from . import db, discover, dispatch, ecosystem, index, orchestrate, spider
 
 console = Console()
 
@@ -43,7 +46,8 @@ def add(ctx, repos, head, priority):
 
         console.print(f"[cyan]Adding {repo}...[/]")
 
-        repo_id = db.add_repo(conn, repo, head_only=head, priority=priority)
+        inferred_lang = ecosystem.infer_language(repo)
+        repo_id = db.add_repo(conn, repo, head_only=head, priority=priority, language=inferred_lang)
         if priority > 0:
             conn.execute("UPDATE repos SET priority = ? WHERE id = ? AND priority < ?", (priority, repo_id, priority))
             conn.commit()
@@ -153,6 +157,14 @@ def add_org(ctx, org, priority, include_forks, min_stars, update_priority):
                 )
             else:
                 console.print(f"  [dim]{full_name} ({lang}, {stars}★) - already tracked[/]")
+
+            # Backfill language on existing repo if not set
+            if lang != "?":
+                conn.execute(
+                    "UPDATE repos SET language = ? WHERE id = ? AND language IS NULL",
+                    (lang, existing["id"]),
+                )
+                conn.commit()
             continue
 
         console.print(f"  [cyan]{full_name}[/] ({lang}, {stars}★)...", end=" ")
@@ -163,14 +175,15 @@ def add_org(ctx, org, priority, include_forks, min_stars, update_priority):
             console.print(f"[red]error: {e}[/]")
             continue
 
+        lang_to_save = lang if lang != "?" else None
         if tags:
-            repo_id = db.add_repo(conn, full_name, priority=priority)
+            repo_id = db.add_repo(conn, full_name, priority=priority, language=lang_to_save)
             db.add_tags(conn, repo_id, tags)
             console.print(f"[green]{len(tags)} tags (priority={priority})[/]")
             added += 1
         else:
             default_branch = repo_info.get("default_branch") or discover.get_default_branch(full_name)
-            repo_id = db.add_repo(conn, full_name, head_only=True, priority=priority)
+            repo_id = db.add_repo(conn, full_name, head_only=True, priority=priority, language=lang_to_save)
             db.add_tags(conn, repo_id, [default_branch])
             console.print(f"[green]added HEAD ({default_branch}) priority={priority}[/]")
             added += 1
@@ -538,3 +551,112 @@ def rediscover(ctx, repo, all_pending, zero_only):
         total_added += pending_after
 
     console.print(f"\n[bold green]Re-discovered {len(targets)} repos, {total_added} pending tags total[/]")
+
+
+@cli.command("export-ecosystem")
+@click.option("-o", "--output", "output_paths", multiple=True, help="Output path(s) for ecosystem.json")
+@click.option("--catalog", "catalog_path", default=None, help="Path to catalog.json (default ~/.rlex/catalog.json)")
+@click.option("--quads", default=118650000, type=int, show_default=True, help="Total quads override for meta")
+@click.option("--allow-empty", is_flag=True, help="Allow writing dataset with zero edges without error")
+@click.option("--stdout", is_flag=True, help="Print generated JSON to stdout instead of files")
+@click.pass_context
+def export_ecosystem_cmd(ctx, output_paths, catalog_path, quads, allow_empty, stdout):
+    """Generate ecosystem.json directly from SQLite for repolex-www and repolex-viz."""
+    conn = ctx.obj["conn"]
+
+    payload = ecosystem.generate_ecosystem_payload(
+        conn,
+        catalog_path=catalog_path,
+        total_quads=quads,
+    )
+
+    total_edges = payload["meta"]["total_edges"]
+    total_repos = payload["meta"]["total_repos"]
+
+    if total_edges == 0 and not allow_empty:
+        # Check if Oxigraph is available to pull edges first
+        console.print("[yellow]0 dependency edges found in forx.db.[/]")
+        console.print("[cyan]Attempting to bootstrap edges from Oxigraph (http://localhost:7878/query)...[/]")
+        try:
+            imported = ecosystem.import_sparql_dependencies(conn)
+            if imported > 0:
+                console.print(f"[green]Successfully imported {imported} edges from Oxigraph![/]")
+                # Re-generate payload with the new edges
+                payload = ecosystem.generate_ecosystem_payload(
+                    conn,
+                    catalog_path=catalog_path,
+                    total_quads=quads,
+                )
+                total_edges = payload["meta"]["total_edges"]
+                total_repos = payload["meta"]["total_repos"]
+        except Exception as e:
+            console.print(f"[dim yellow]Could not contact Oxigraph: {e}[/]")
+
+    if total_edges == 0 and not allow_empty:
+        console.print("[red]Error: 0 dependency edges found and no cached/imported links available.[/]")
+        console.print("Pass --allow-empty to explicitly export an empty graph or run 'forx import-oxigraph-deps'.")
+        raise click.Abort()
+
+    json_str = json.dumps(payload, indent=2)
+
+    if stdout:
+        click.echo(json_str)
+        return
+
+    # Determine output destinations
+    destinations = []
+    if output_paths:
+        destinations = [Path(p) for p in output_paths]
+    else:
+        # Default standard paths
+        default_candidates = [
+            ecosystem.DEFAULT_WWW_OUTPUT,
+            ecosystem.DEFAULT_VIZ_OUTPUT,
+            Path.home() / "repos" / "repolex-ai" / "repolex-viz" / "data" / "ecosystem.json",
+        ]
+        # Keep unique resolved paths that exist or whose parents exist
+        seen = set()
+        for cand in default_candidates:
+            try:
+                resolved = cand.resolve()
+            except Exception:
+                resolved = cand
+            if str(resolved) not in seen and (cand.parent.exists() or cand.exists()):
+                seen.add(str(resolved))
+                destinations.append(cand)
+
+        if not destinations:
+            destinations = [Path("ecosystem.json")]
+
+    for dest in destinations:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json_str)
+        console.print(f"[green]Wrote {dest} ({total_repos} nodes, {total_edges} edges)[/]")
+
+
+@cli.command("backfill-languages")
+@click.option("--dry-run", is_flag=True, help="Print inferred languages without updating database")
+@click.pass_context
+def backfill_languages_cmd(ctx, dry_run):
+    """Backfill repos.language for all tracked repositories with missing language."""
+    conn = ctx.obj["conn"]
+    console.print("[cyan]Backfilling missing repo languages...[/]")
+    updated, total = ecosystem.backfill_languages(conn, dry_run=dry_run)
+    mode = "[yellow](dry-run)[/]" if dry_run else ""
+    console.print(f"[bold green]Successfully assigned language to {updated}/{total} repos {mode}[/]")
+
+
+@cli.command("import-oxigraph-deps")
+@click.option("--url", default="http://localhost:7878/query", show_default=True, help="Oxigraph SPARQL query endpoint")
+@click.pass_context
+def import_oxigraph_deps_cmd(ctx, url):
+    """Import dependency triples from Oxigraph SPARQL store into forx.db."""
+    conn = ctx.obj["conn"]
+    console.print(f"[cyan]Querying Oxigraph at {url}...[/]")
+    try:
+        count = ecosystem.import_sparql_dependencies(conn, sparql_url=url)
+        console.print(f"[bold green]Successfully imported {count} dependency edges into forx.db![/]")
+    except Exception as e:
+        console.print(f"[red]Failed to import from Oxigraph: {e}[/]")
+        raise click.Abort()
+

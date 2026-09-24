@@ -79,7 +79,11 @@ def get_dependencies_from_manifest(manifest: dict) -> list[dict]:
             full_name = dep_id.split("/r/", 1)[1]
             if "/" in full_name and full_name not in seen:
                 seen.add(full_name)
-                deps.append({"full_name": full_name, "package": dep.get("repolex:packageName", "")})
+                deps.append({
+                    "full_name": full_name,
+                    "package": dep.get("repolex:packageName", ""),
+                    "ecosystem": dep.get("repolex:packageEcosystem", ""),
+                })
 
     # Legacy format: versions[].dependencies[]
     for version in manifest.get("versions", []):
@@ -90,7 +94,11 @@ def get_dependencies_from_manifest(manifest: dict) -> list[dict]:
                 full_name = f"{org}/{repo}"
                 if full_name not in seen:
                     seen.add(full_name)
-                    deps.append({"full_name": full_name, "package": dep.get("packageName", "")})
+                    deps.append({
+                        "full_name": full_name,
+                        "package": dep.get("packageName", ""),
+                        "ecosystem": dep.get("packageEcosystem", ""),
+                    })
 
     return deps
 
@@ -140,6 +148,8 @@ def get_dependencies_from_dep_graph(storage_repo: str) -> list[dict]:
                 subjects[subj]["repo"] = obj.strip('"')
             elif "packageName" in pred:
                 subjects[subj]["package"] = obj.strip('"')
+            elif "packageEcosystem" in pred:
+                subjects[subj]["ecosystem"] = obj.strip('"')
 
         for subj, info in subjects.items():
             org = info.get("org", "").split("#")[0]
@@ -148,7 +158,11 @@ def get_dependencies_from_dep_graph(storage_repo: str) -> list[dict]:
                 full_name = f"{org}/{repo}"
                 if full_name not in seen:
                     seen.add(full_name)
-                    deps.append({"full_name": full_name, "package": info.get("package", "")})
+                    deps.append({
+                        "full_name": full_name,
+                        "package": info.get("package", ""),
+                        "ecosystem": info.get("ecosystem", ""),
+                    })
 
     return deps
 
@@ -160,6 +174,8 @@ def spider_repo(conn, full_name: str, storage_repo: str) -> list[str]:
       2. repo-manifest.jsonld / manifest.json (repolex:dependencyRepo)
       3. Source path (package files via gh api) as fallback
 
+    Records discovered dependency edges into dependencies table and adds
+    any previously untracked repos to the queue.
     Returns list of newly added repos.
     """
     # Path 1: parser dep graph (best quality — resolved at parse time)
@@ -174,6 +190,10 @@ def spider_repo(conn, full_name: str, storage_repo: str) -> list[str]:
     if not deps:
         return []
 
+    # Get source repo id if tracked
+    source_row = conn.execute("SELECT id FROM repos WHERE full_name = ?", (full_name,)).fetchone()
+    source_id = source_row["id"] if source_row else None
+
     added = []
     for dep in deps:
         dep_name = dep["full_name"]
@@ -181,6 +201,16 @@ def spider_repo(conn, full_name: str, storage_repo: str) -> list[str]:
         # Skip self-references
         if dep_name == full_name:
             continue
+
+        # Record dependency edge into DB
+        if source_id:
+            db.record_dependency(
+                conn,
+                source_repo_id=source_id,
+                target_full_name=dep_name,
+                package_name=dep.get("package", ""),
+                ecosystem=dep.get("ecosystem", ""),
+            )
 
         # Check if already tracked
         existing = conn.execute(
@@ -541,10 +571,10 @@ def _resolve_crates(name: str) -> str | None:
     return _extract_github_repo(crate.get("repository", "") or crate.get("homepage", ""))
 
 
-def discover_deps_for_repo(source_repo: str) -> list[str]:
+def discover_deps_details_for_repo(source_repo: str) -> list[dict]:
     """
     Walk known package files in a source repo, parse declared deps,
-    resolve to GitHub repos. Returns deduped list of org/repo strings.
+    resolve to GitHub repos. Returns list of dicts with full_name, package, ecosystem.
     """
     parsers = {
         "_parse_pyproject_toml": _parse_pyproject_toml,
@@ -555,7 +585,8 @@ def discover_deps_for_repo(source_repo: str) -> list[str]:
         "_parse_go_mod": _parse_go_mod,
     }
 
-    seen_resolved: set[str] = set()
+    seen_pairs: set[tuple[str, str]] = set()
+    deps: list[dict] = []
     for path, ecosystem, parser_name in PACKAGE_FILES:
         text = fetch_source_file(source_repo, path)
         if not text:
@@ -566,23 +597,60 @@ def discover_deps_for_repo(source_repo: str) -> list[str]:
             continue
         for name in names:
             resolved = resolve_dep(name, ecosystem)
-            if resolved and resolved != source_repo and resolved not in seen_resolved:
-                seen_resolved.add(resolved)
-    return sorted(seen_resolved)
+            if resolved and resolved != source_repo:
+                key = (resolved, name)
+                if key not in seen_pairs:
+                    seen_pairs.add(key)
+                    deps.append({
+                        "full_name": resolved,
+                        "package": name,
+                        "ecosystem": ecosystem,
+                    })
+    return deps
+
+
+def discover_deps_for_repo(source_repo: str) -> list[str]:
+    """
+    Walk known package files in a source repo, parse declared deps,
+    resolve to GitHub repos. Returns deduped list of org/repo strings.
+    """
+    details = discover_deps_details_for_repo(source_repo)
+    return sorted({d["full_name"] for d in details})
 
 
 def spider_repo_via_source(conn, source_repo: str) -> list[str]:
     """
     Discover deps for a source repo by reading its package files directly.
-    Adds resolved deps to the db (skipping any already tracked).
+    Records dependency edges in dependencies table and adds resolved deps
+    to the db (skipping any already tracked).
     Returns list of newly added repo full_names.
     """
-    deps = discover_deps_for_repo(source_repo)
-    if not deps:
+    dep_details = discover_deps_details_for_repo(source_repo)
+    if not dep_details:
         return []
 
+    source_row = conn.execute("SELECT id FROM repos WHERE full_name = ?", (source_repo,)).fetchone()
+    source_id = source_row["id"] if source_row else None
+
     added: list[str] = []
-    for dep_name in deps:
+    seen_names: set[str] = set()
+    for dep in dep_details:
+        dep_name = dep["full_name"]
+
+        # Record dependency edge into DB
+        if source_id:
+            db.record_dependency(
+                conn,
+                source_repo_id=source_id,
+                target_full_name=dep_name,
+                package_name=dep.get("package", ""),
+                ecosystem=dep.get("ecosystem", ""),
+            )
+
+        if dep_name in seen_names:
+            continue
+        seen_names.add(dep_name)
+
         existing = conn.execute(
             "SELECT id FROM repos WHERE full_name = ?", (dep_name,)
         ).fetchone()

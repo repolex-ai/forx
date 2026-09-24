@@ -43,6 +43,21 @@ MIGRATIONS = [
 
     CREATE INDEX IF NOT EXISTS idx_tags_status ON tags(status);
     CREATE INDEX IF NOT EXISTS idx_tags_repo_status ON tags(repo_id, status);
+
+    CREATE TABLE IF NOT EXISTS dependencies (
+        id INTEGER PRIMARY KEY,
+        source_repo_id INTEGER NOT NULL REFERENCES repos(id),
+        target_repo_id INTEGER REFERENCES repos(id),
+        target_full_name TEXT NOT NULL,
+        package_name TEXT NOT NULL DEFAULT '',
+        ecosystem TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE(source_repo_id, target_full_name, package_name)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_dependencies_source ON dependencies(source_repo_id);
+    CREATE INDEX IF NOT EXISTS idx_dependencies_target ON dependencies(target_repo_id);
+    CREATE INDEX IF NOT EXISTS idx_dependencies_target_name ON dependencies(target_full_name);
     """,
 ]
 
@@ -75,6 +90,25 @@ def get_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     else:
         # Old schema with 'version' column - migrate
         _migrate_v0_to_v1(conn)
+
+    # Ensure dependencies table exists (for existing DBs)
+    if "dependencies" not in tables:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS dependencies (
+                id INTEGER PRIMARY KEY,
+                source_repo_id INTEGER NOT NULL REFERENCES repos(id),
+                target_repo_id INTEGER REFERENCES repos(id),
+                target_full_name TEXT NOT NULL,
+                package_name TEXT NOT NULL DEFAULT '',
+                ecosystem TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(source_repo_id, target_full_name, package_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_dependencies_source ON dependencies(source_repo_id);
+            CREATE INDEX IF NOT EXISTS idx_dependencies_target ON dependencies(target_repo_id);
+            CREATE INDEX IF NOT EXISTS idx_dependencies_target_name ON dependencies(target_full_name);
+        """)
+        conn.commit()
 
     # Add parser_version column if missing
     cols = {r[1] for r in conn.execute("PRAGMA table_info(tags)").fetchall()}
@@ -150,20 +184,152 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def add_repo(conn: sqlite3.Connection, full_name: str, head_only: bool = False, priority: int = 0) -> int:
+def add_repo(
+    conn: sqlite3.Connection,
+    full_name: str,
+    head_only: bool = False,
+    priority: int = 0,
+    language: str | None = None,
+) -> int:
     """Add a repo to track. Returns repo id."""
     org, name = full_name.split("/", 1)
     storage_repo = f"repolex-forx/{full_name.replace('/', '--')}"
 
     conn.execute(
-        """INSERT OR IGNORE INTO repos (org, name, full_name, storage_repo, head_only, priority, added_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (org, name, full_name, storage_repo, int(head_only), priority, now()),
+        """INSERT OR IGNORE INTO repos (org, name, full_name, storage_repo, language, head_only, priority, added_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (org, name, full_name, storage_repo, language, int(head_only), priority, now()),
     )
     conn.commit()
 
-    row = conn.execute("SELECT id FROM repos WHERE full_name = ?", (full_name,)).fetchone()
+    row = conn.execute("SELECT id, language FROM repos WHERE full_name = ?", (full_name,)).fetchone()
+    repo_id = row["id"]
+
+    if language and not row["language"]:
+        conn.execute("UPDATE repos SET language = ? WHERE id = ?", (language, repo_id))
+        conn.commit()
+
+    # Resolve any existing dependencies targeting this repo that didn't have target_repo_id yet
+    conn.execute(
+        "UPDATE dependencies SET target_repo_id = ? WHERE target_full_name = ? AND target_repo_id IS NULL",
+        (repo_id, full_name),
+    )
+    conn.commit()
+
+    return repo_id
+
+
+def record_dependency(
+    conn: sqlite3.Connection,
+    source_repo_id: int,
+    target_full_name: str,
+    package_name: str = "",
+    ecosystem: str | None = None,
+    target_repo_id: int | None = None,
+) -> int:
+    """Record a dependency edge from source_repo to target_full_name."""
+    pkg = package_name or ""
+    if target_repo_id is None:
+        target_row = conn.execute(
+            "SELECT id FROM repos WHERE full_name = ?", (target_full_name,)
+        ).fetchone()
+        if target_row:
+            target_repo_id = target_row["id"]
+
+    conn.execute(
+        """INSERT INTO dependencies (source_repo_id, target_repo_id, target_full_name, package_name, ecosystem, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(source_repo_id, target_full_name, package_name) DO UPDATE SET
+               target_repo_id = COALESCE(excluded.target_repo_id, dependencies.target_repo_id),
+               ecosystem = COALESCE(excluded.ecosystem, dependencies.ecosystem)""",
+        (source_repo_id, target_repo_id, target_full_name, pkg, ecosystem, now()),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT id FROM dependencies WHERE source_repo_id = ? AND target_full_name = ? AND package_name = ?",
+        (source_repo_id, target_full_name, pkg),
+    ).fetchone()
     return row["id"]
+
+
+def record_dependencies_batch(
+    conn: sqlite3.Connection,
+    deps: list[dict],
+) -> int:
+    """
+    Batch record dependencies.
+    Each item in deps should be a dict with:
+      source_repo_id (or source_full_name)
+      target_full_name
+      package_name (optional)
+      ecosystem (optional)
+    """
+    if not deps:
+        return 0
+
+    repo_name_to_id = {
+        row["full_name"]: row["id"]
+        for row in conn.execute("SELECT id, full_name FROM repos").fetchall()
+    }
+
+    ts = now()
+    to_insert = []
+    for d in deps:
+        src_id = d.get("source_repo_id")
+        if src_id is None:
+            src_name = d.get("source_full_name")
+            if src_name:
+                if src_name not in repo_name_to_id:
+                    repo_name_to_id[src_name] = add_repo(conn, src_name)
+                src_id = repo_name_to_id[src_name]
+        if src_id is None:
+            continue
+
+        target_name = d["target_full_name"]
+        target_id = d.get("target_repo_id") or repo_name_to_id.get(target_name)
+        pkg = d.get("package_name") or ""
+        eco = d.get("ecosystem")
+        to_insert.append((src_id, target_id, target_name, pkg, eco, ts))
+
+    conn.executemany(
+        """INSERT INTO dependencies (source_repo_id, target_repo_id, target_full_name, package_name, ecosystem, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(source_repo_id, target_full_name, package_name) DO UPDATE SET
+               target_repo_id = COALESCE(excluded.target_repo_id, dependencies.target_repo_id),
+               ecosystem = COALESCE(excluded.ecosystem, dependencies.ecosystem)""",
+        to_insert,
+    )
+    conn.commit()
+    return len(to_insert)
+
+
+def get_dependencies(
+    conn: sqlite3.Connection,
+    source_repo_id: int | None = None,
+    target_repo_id: int | None = None,
+) -> list[sqlite3.Row]:
+    """Get recorded dependencies, optionally filtered by source or target repo."""
+    query = """
+        SELECT d.id, d.source_repo_id, d.target_repo_id, d.target_full_name,
+               d.package_name, d.ecosystem, d.created_at,
+               r_src.full_name as source_full_name
+        FROM dependencies d
+        JOIN repos r_src ON d.source_repo_id = r_src.id
+    """
+    params = []
+    conditions = []
+    if source_repo_id is not None:
+        conditions.append("d.source_repo_id = ?")
+        params.append(source_repo_id)
+    if target_repo_id is not None:
+        conditions.append("d.target_repo_id = ?")
+        params.append(target_repo_id)
+
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY r_src.full_name, d.target_full_name"
+
+    return conn.execute(query, params).fetchall()
 
 
 def add_tags(conn: sqlite3.Connection, repo_id: int, git_tags: list[str]):
