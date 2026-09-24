@@ -133,6 +133,32 @@ class TestCliAddOrg(unittest.TestCase):
             "spider/lib-a",
         ])
 
+    @patch("forx.discover.discover_repo")
+    def test_add_command_with_priority(self, mock_discover_repo):
+        mock_discover_repo.return_value = ["v0.22.3", "v0.22.2"]
+        result = self.runner.invoke(cli, ["--db", str(self.db_path), "add", "tim-osterhus/millrace", "--priority", "1200"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("2 tags (priority=1200)", result.output)
+
+        row = self.conn.execute("SELECT priority, head_only FROM repos WHERE full_name = 'tim-osterhus/millrace'").fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["priority"], 1200)
+        self.assertEqual(row["head_only"], 0)
+
+    @patch("forx.discover.get_default_branch")
+    @patch("forx.discover.discover_repo")
+    def test_add_command_tagless_fallback(self, mock_discover_repo, mock_get_default_branch):
+        mock_discover_repo.return_value = []
+        mock_get_default_branch.return_value = "main"
+        result = self.runner.invoke(cli, ["--db", str(self.db_path), "add", "test-org/tagless-repo", "--priority", "900"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("no tags found, added HEAD (main) priority=900", result.output)
+
+        row = self.conn.execute("SELECT priority, head_only FROM repos WHERE full_name = 'test-org/tagless-repo'").fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["priority"], 900)
+        self.assertEqual(row["head_only"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

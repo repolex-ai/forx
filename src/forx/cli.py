@@ -23,14 +23,16 @@ def cli(ctx, db_path):
 @cli.command()
 @click.argument("repos", nargs=-1, required=True)
 @click.option("--head", is_flag=True, help="Parse HEAD instead of tags (for repos without releases)")
+@click.option("--priority", "-p", "-P", default=0, show_default=True, type=int, help="Priority level for repo (higher = parsed sooner)")
 @click.pass_context
-def add(ctx, repos, head):
+def add(ctx, repos, head, priority):
     """Add repos to parse. Discovers tags automatically.
 
     Examples:
         forx add TopQuadrant/shacl
         forx add pallets/click encode/httpx Textualize/rich
         forx add --head TopQuadrant/shacl-js
+        forx add tim-osterhus/millrace --priority 1200
     """
     conn = ctx.obj["conn"]
 
@@ -41,12 +43,15 @@ def add(ctx, repos, head):
 
         console.print(f"[cyan]Adding {repo}...[/]")
 
-        repo_id = db.add_repo(conn, repo, head_only=head)
+        repo_id = db.add_repo(conn, repo, head_only=head, priority=priority)
+        if priority > 0:
+            conn.execute("UPDATE repos SET priority = ? WHERE id = ? AND priority < ?", (priority, repo_id, priority))
+            conn.commit()
 
         if head:
             default_branch = discover.get_default_branch(repo)
             db.add_tags(conn, repo_id, [default_branch])
-            console.print(f"  [green]Added as HEAD-only ({default_branch})[/]")
+            console.print(f"  [green]Added as HEAD-only ({default_branch}) priority={priority}[/]")
             continue
 
         # Discover all tags
@@ -58,10 +63,14 @@ def add(ctx, repos, head):
             continue
 
         if not tags:
-            console.print("[yellow]no tags found[/]")
+            default_branch = discover.get_default_branch(repo)
+            conn.execute("UPDATE repos SET head_only = 1 WHERE id = ?", (repo_id,))
+            db.add_tags(conn, repo_id, [default_branch])
+            conn.commit()
+            console.print(f"[yellow]no tags found, added HEAD ({default_branch}) priority={priority}[/]")
             continue
 
-        console.print(f"[green]{len(tags)} tags[/]")
+        console.print(f"[green]{len(tags)} tags (priority={priority})[/]")
 
         # Add tags to DB
         db.add_tags(conn, repo_id, tags)
