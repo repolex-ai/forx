@@ -395,16 +395,13 @@ jobs:
           fi
 
       # ============================================================
-      # AUDIT COMMENT DISPATCH — combine phase only
+      # AUDIT SUMMARY DISPATCH — combine phase only (workflow step summary only)
       # ============================================================
 
-      - name: Post rlex audit comment (combine phase only)
+      - name: Generate rlex audit summary (combine phase only)
         if: inputs.phase == 'combine'
-        env:
-          GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
           uv run --with pyoxigraph python3 ${{ github.workspace }}/tools/post_audit_comment.py \
             --repo "${{ inputs.repo }}" \
             --commit "${{ env.COMMIT_SHA }}" \
-            --storage "${{ github.workspace }}/storage" \
-            --comment || echo "Audit comment failed or skipped"
+            --storage "${{ github.workspace }}/storage" || echo "Audit summary failed or skipped"

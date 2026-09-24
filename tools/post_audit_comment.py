@@ -465,6 +465,11 @@ def main():
     print(markdown_report)
 
     if args.comment:
+        allowed_orgs = ("repolex-ai", "repolex-forx")
+        if not any(args.repo.startswith(f"{org}/") for org in allowed_orgs):
+            print(f"Skipping comment: {args.repo} is an external repository. Comments are strictly restricted to {allowed_orgs}.", file=sys.stderr)
+            return
+
         print(f"\nPosting commit comment to {args.repo}@{args.commit[:8]}...")
         try:
             comment_url = post_github_comment(args.repo, args.commit, markdown_report)
