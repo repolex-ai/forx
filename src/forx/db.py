@@ -7,10 +7,9 @@ from pathlib import Path
 DEFAULT_DB_PATH = Path.home() / ".forx" / "forx.db"
 
 # The parser version used by the current workflow.
-# Bump this when repolex-parser-py gets a new release that
-# changes output format. Tags parsed with an older version
-# can be invalidated with `forx reparse`.
-PARSER_VERSION = "v0.1.10"
+# Set to 'main' to use the latest repolex-parser-py with native
+# repolex_core_rs Rust acceleration and COTTAS Parquet dual-emission.
+PARSER_VERSION = "main"
 
 MIGRATIONS = [
     # v1: initial schema
