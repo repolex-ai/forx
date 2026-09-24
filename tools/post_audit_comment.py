@@ -439,7 +439,7 @@ def post_github_comment(repo: str, commit_sha: str, body: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Post Repolex Code Audit commit comment to GitHub")
-    parser.add_argument("--storage-dir", default="storage", help="Path to parsed storage directory")
+    parser.add_argument("--storage-dir", "--storage", dest="storage_dir", default="storage", help="Path to parsed storage directory")
     parser.add_argument("--repo", required=True, help="Repository in org/name format")
     parser.add_argument("--commit", required=True, help="Commit SHA")
     parser.add_argument("--comment", action="store_true", help="Post comment to GitHub")
@@ -451,7 +451,9 @@ def main():
     markdown_report = run_audit(storage_path, args.repo, args.commit)
 
     if args.output:
-        Path(args.output).write_text(markdown_report)
+        out_file = Path(args.output)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text(markdown_report, encoding="utf-8")
 
     # If GITHUB_STEP_SUMMARY is set, write to summary
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")

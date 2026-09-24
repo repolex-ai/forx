@@ -264,6 +264,16 @@ jobs:
       # COMBINE PHASE FINALIZATION — only after combine succeeds
       # ============================================================
 
+      - name: Generate rlex audit report (combine phase only)
+        if: inputs.phase == 'combine'
+        run: |
+          mkdir -p "${{ github.workspace }}/storage/audit"
+          uv run --with pyoxigraph python3 ${{ github.workspace }}/tools/post_audit_comment.py \
+            --repo "${{ inputs.repo }}" \
+            --commit "${{ env.COMMIT_SHA }}" \
+            --storage "${{ github.workspace }}/storage" \
+            --output "${{ github.workspace }}/storage/audit/${{ env.COMMIT_SHA }}.md" || echo "Audit generation failed or skipped"
+
       - name: Generate README (combine phase only)
         if: inputs.phase == 'combine'
         run: |
@@ -292,29 +302,27 @@ jobs:
 
           ## How to use this data
 
-          The easiest way to get started is to install the [lexq](https://github.com/repolex-ai/lexq) query tool using [uv](https://docs.astral.sh/uv/getting-started/installation/).
-
-          If you have uv installed, just copy/paste this into your terminal:
+          The easiest way to get started is to install the [rlex](https://github.com/repolex-ai/rlex) query tool:
 
           ```bash
-          uv tool install git+https://github.com/repolex-ai/lexq
+          cargo install --git https://github.com/repolex-ai/rlex
           ```
 
-          This installs lexq onto your system, in your user context. Verify the install:
+          Verify the install:
 
           ```bash
-          lexq --help
+          rlex --help
           ```
 
-          **lexq is designed to be used primarily by LLMs in a terminal.** Start up your favorite LLM and ask it to use the lexq tool. It's that easy!
+          **rlex is designed to be used primarily by LLMs in a terminal.** Start up your favorite AI assistant and ask it to use rlex. It handles the SPARQL — you just ask questions in plain English.
 
           To load this repo's data:
 
           ```bash
-          lexq download ${{ inputs.repo }}
+          rlex download ${{ inputs.repo }}
           ```
 
-          This will automatically download essential data files from the last parsed commit. Consult `lexq --moreinfo` for other options, including downloading multiple commits, blobs, etc.
+          Consult `rlex --help` for other options, including SPARQL queries, HTTP server, and interactive visualization.
 
           ## Data structure
 
@@ -341,6 +349,7 @@ jobs:
           | `branch/` | Branch metadata. |
           | `tag/` | Tag metadata. |
           | `filetree/` | File tree snapshots per commit (which files existed and their blob SHAs). |
+          | `audit/` | Code architecture and graph audit reports per commit. |
 
           ## Source repository
 
@@ -383,9 +392,9 @@ jobs:
           print(f'Built index.json with {len(versions)} versions')
           "
 
-          git add README.md index.json
+          git add README.md index.json audit/
           if ! git diff --staged --quiet; then
-            git commit -m "Update README and index for ${{ inputs.repo }}@${{ inputs.tag }}"
+            git commit -m "Update README, index, and audit for ${{ inputs.repo }}@${{ inputs.tag }}"
             for attempt in 1 2 3 4 5; do
               if ! git pull --rebase -X theirs origin main; then
                 git rebase --abort 2>/dev/null || true
@@ -393,15 +402,3 @@ jobs:
               git push && break || sleep 2
             done
           fi
-
-      # ============================================================
-      # AUDIT SUMMARY DISPATCH — combine phase only (workflow step summary only)
-      # ============================================================
-
-      - name: Generate rlex audit summary (combine phase only)
-        if: inputs.phase == 'combine'
-        run: |
-          uv run --with pyoxigraph python3 ${{ github.workspace }}/tools/post_audit_comment.py \
-            --repo "${{ inputs.repo }}" \
-            --commit "${{ env.COMMIT_SHA }}" \
-            --storage "${{ github.workspace }}/storage" || echo "Audit summary failed or skipped"
