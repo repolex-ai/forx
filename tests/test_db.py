@@ -51,6 +51,17 @@ class TestDbCommitShaTracking(unittest.TestCase):
         self.assertEqual(len(dispatched), 1)
         self.assertEqual(dispatched[0]["commit_sha"], "sha_dispatched_1")
 
+    def test_add_repo_priority(self):
+        repo_id = db.add_repo(self.conn, "custom-org/high-priority", priority=800)
+        row = self.conn.execute("SELECT priority, head_only FROM repos WHERE id = ?", (repo_id,)).fetchone()
+        self.assertEqual(row["priority"], 800)
+        self.assertEqual(row["head_only"], 0)
+
+        head_repo_id = db.add_repo(self.conn, "custom-org/head-repo", head_only=True, priority=500)
+        head_row = self.conn.execute("SELECT priority, head_only FROM repos WHERE id = ?", (head_repo_id,)).fetchone()
+        self.assertEqual(head_row["priority"], 500)
+        self.assertEqual(head_row["head_only"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -79,15 +79,51 @@ def discover_repo(repo_full_name: str) -> list[str]:
     return get_git_tags(repo_full_name)
 
 
+def get_default_branch(repo_full_name: str) -> str:
+    """Get the default branch for a repo (e.g. 'main' or 'master')."""
+    try:
+        result = subprocess.run(
+            [
+                "gh", "repo", "view", repo_full_name,
+                "--json", "defaultBranchRef",
+                "--jq", ".defaultBranchRef.name",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--symref", f"https://github.com/{repo_full_name}.git", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            for line in result.stdout.strip().split("\n"):
+                if line.startswith("ref: refs/heads/"):
+                    target = line.split("\t")[0]
+                    return target.removeprefix("ref: refs/heads/").strip()
+    except Exception:
+        pass
+
+    return "main"
+
+
 def list_org_repos(org: str, include_forks: bool = False) -> list[dict]:
     """
     List all repos in a GitHub org/user using gh CLI.
-    Returns list of {full_name, language, stars, fork} dicts.
+    Returns list of {full_name, language, stars, fork, default_branch} dicts.
     """
     args = [
         "gh", "api", "--paginate",
         f"/orgs/{org}/repos",
-        "--jq", ".[] | {full_name: .full_name, language: .language, stars: .stargazers_count, fork: .fork, archived: .archived}",
+        "--jq", ".[] | {full_name: .full_name, language: .language, stars: .stargazers_count, fork: .fork, archived: .archived, default_branch: .default_branch}",
     ]
     result = subprocess.run(args, capture_output=True, text=True, timeout=60)
 
@@ -114,3 +150,4 @@ def list_org_repos(org: str, include_forks: bool = False) -> list[dict]:
             continue
 
     return repos
+

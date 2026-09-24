@@ -10,11 +10,14 @@ console = Console()
 
 
 @click.group()
+@click.option("--db", "db_path", default=None, help="Path to sqlite database")
 @click.pass_context
-def cli(ctx):
+def cli(ctx, db_path):
     """forx - Parse every open source repo into RDF."""
     ctx.ensure_object(dict)
-    ctx.obj["conn"] = db.get_db()
+    conn = db.get_db(db_path)
+    ctx.call_on_close(conn.close)
+    ctx.obj["conn"] = conn
 
 
 @cli.command()
@@ -41,7 +44,9 @@ def add(ctx, repos, head):
         repo_id = db.add_repo(conn, repo, head_only=head)
 
         if head:
-            console.print("  [green]Added as HEAD-only (will parse default branch)[/]")
+            default_branch = discover.get_default_branch(repo)
+            db.add_tags(conn, repo_id, [default_branch])
+            console.print(f"  [green]Added as HEAD-only ({default_branch})[/]")
             continue
 
         # Discover all tags
@@ -68,16 +73,20 @@ def add(ctx, repos, head):
 
 @cli.command()
 @click.argument("org")
+@click.option("--priority", "-p", "-P", default=500, show_default=True, type=int, help="Priority level for discovered repos (default 500)")
 @click.option("--include-forks", is_flag=True, help="Include forked repos")
 @click.option("--min-stars", default=0, help="Only add repos with at least this many stars")
+@click.option("--update-priority", is_flag=True, help="Update priority for already-tracked repos")
 @click.pass_context
-def add_org(ctx, org, include_forks, min_stars):
+def add_org(ctx, org, priority, include_forks, min_stars, update_priority):
     """Add all repos from a GitHub org or user.
 
-    Discovers all non-archived repos and their tags.
+    Discovers all non-archived repos and their tags. If a repo has no tags,
+    falls back to its default branch HEAD.
 
     Examples:
         forx add-org pallets
+        forx add-org asimov-platform --priority 800
         forx add-org NousResearch --min-stars 10
         forx add-org someuser --include-forks
     """
@@ -103,15 +112,41 @@ def add_org(ctx, org, include_forks, min_stars):
 
         # Check if already tracked
         existing = conn.execute(
-            "SELECT id FROM repos WHERE full_name = ?", (full_name,)
+            "SELECT id, priority, head_only FROM repos WHERE full_name = ?", (full_name,)
         ).fetchone()
         if existing:
-            console.print(f"  [dim]{full_name} ({lang}, {stars}★) - already tracked[/]")
+            # Check if it was stranded without any tags
+            tag_count = conn.execute(
+                "SELECT COUNT(*) as count FROM tags WHERE repo_id = ?", (existing["id"],)
+            ).fetchone()["count"]
+            if tag_count == 0:
+                default_branch = repo_info.get("default_branch") or discover.get_default_branch(full_name)
+                conn.execute(
+                    "UPDATE repos SET head_only = 1, priority = ? WHERE id = ?",
+                    (priority, existing["id"]),
+                )
+                db.add_tags(conn, existing["id"], [default_branch])
+                conn.commit()
+                console.print(
+                    f"  [cyan]{full_name}[/] ({lang}, {stars}★)... [green]rescued tagless HEAD ({default_branch}) priority={priority}[/]"
+                )
+                added += 1
+                continue
+
+            if update_priority or existing["priority"] != priority:
+                conn.execute(
+                    "UPDATE repos SET priority = ? WHERE id = ?",
+                    (priority, existing["id"]),
+                )
+                conn.commit()
+                console.print(
+                    f"  [dim]{full_name} ({lang}, {stars}★) - already tracked, updated priority {existing['priority']} -> {priority}[/]"
+                )
+            else:
+                console.print(f"  [dim]{full_name} ({lang}, {stars}★) - already tracked[/]")
             continue
 
         console.print(f"  [cyan]{full_name}[/] ({lang}, {stars}★)...", end=" ")
-
-        repo_id = db.add_repo(conn, full_name)
 
         try:
             tags = discover.discover_repo(full_name)
@@ -120,11 +155,16 @@ def add_org(ctx, org, include_forks, min_stars):
             continue
 
         if tags:
+            repo_id = db.add_repo(conn, full_name, priority=priority)
             db.add_tags(conn, repo_id, tags)
-            console.print(f"[green]{len(tags)} tags[/]")
+            console.print(f"[green]{len(tags)} tags (priority={priority})[/]")
             added += 1
         else:
-            console.print("[yellow]no tags[/]")
+            default_branch = repo_info.get("default_branch") or discover.get_default_branch(full_name)
+            repo_id = db.add_repo(conn, full_name, head_only=True, priority=priority)
+            db.add_tags(conn, repo_id, [default_branch])
+            console.print(f"[green]added HEAD ({default_branch}) priority={priority}[/]")
+            added += 1
 
     console.print(f"\n[bold green]Added {added} repos from {org}[/]")
 

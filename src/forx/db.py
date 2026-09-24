@@ -150,15 +150,15 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def add_repo(conn: sqlite3.Connection, full_name: str, head_only: bool = False) -> int:
+def add_repo(conn: sqlite3.Connection, full_name: str, head_only: bool = False, priority: int = 0) -> int:
     """Add a repo to track. Returns repo id."""
     org, name = full_name.split("/", 1)
     storage_repo = f"repolex-forx/{full_name.replace('/', '--')}"
 
     conn.execute(
-        """INSERT OR IGNORE INTO repos (org, name, full_name, storage_repo, head_only, added_at)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (org, name, full_name, storage_repo, int(head_only), now()),
+        """INSERT OR IGNORE INTO repos (org, name, full_name, storage_repo, head_only, priority, added_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (org, name, full_name, storage_repo, int(head_only), priority, now()),
     )
     conn.commit()
 
