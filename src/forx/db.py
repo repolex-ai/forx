@@ -357,17 +357,18 @@ def get_pending_tags(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.
     (so each job builds on the previous one's blob cache) while still
     running up to `limit` repos in parallel.
 
-    Ordering (broad-and-wide dependency network coverage):
-      1. Repos with ZERO prior complete tags first (bucket them ahead)
-      2. Then by explicit r.priority DESC (canary scoping still works)
-      3. Then by r.id (deterministic tiebreak)
-
-    Per-repo tag pick: the row with MIN(discovery_order). Tags freshly added
-    via discover.get_git_tags get their index in the GitHub-API-returned list
-    (newest first → discovery_order=0 is newest). Old rows default to 0 so
-    they all tie and fall back to MIN(id). Not perfect for repos with mixed
-    old+new insertions but the broad-and-wide use case dominates: brand new
-    repos hit the zero-prior-parses bucket and get the correct latest tag.
+    HEAD-First Scheduling Hierarchy:
+      Tier 1: In-flight tags mid-pipeline (next_action IS NOT NULL: ast/enrich/combine).
+              Finish what has already started compute so work isn't stranded.
+      Tier 2: Unparsed repositories (complete_count = 0).
+              Prioritize the newest tag (discovery_order = 0) or default branch HEAD
+              for every unparsed repo, ordered by priority DESC, repo_id ASC.
+              Drives unique repo coverage toward 1k and 10k milestones.
+      Tier 3: Linked historical tags.
+              Historical tags for repos that are explicit targets in the `dependencies`
+              table (other parsed packages import/depend on this repo).
+      Tier 4: General historical backfill (complete_count > 0, unlinked).
+              Backfill older versions only when no unparsed repos are waiting.
 
     Returns rows with `next_action` and `iteration_count` so the orchestrator
     can determine which phase to dispatch (Option B):
@@ -376,17 +377,19 @@ def get_pending_tags(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.
       - next_action == "ast"/"enrich"/"combine" → dispatch that phase
       - next_action == "done" → shouldn't appear here (status would be complete)
     """
-    # Subquery: for each repo, pick the pending tag with lowest discovery_order
-    # (= newest per GitHub API). id as tiebreak for the zero-default case.
     return conn.execute(
         """WITH ranked AS (
              SELECT t.id, t.git_tag, t.commit_sha,
                     t.next_action, t.iteration_count, t.current_phase,
                     r.id AS repo_id, r.full_name, r.storage_repo, r.org, r.name, r.priority,
                     (SELECT COUNT(*) FROM tags WHERE repo_id = r.id AND status = 'complete') AS complete_count,
+                    EXISTS(SELECT 1 FROM dependencies d WHERE d.target_repo_id = r.id) AS is_dep_target,
                     ROW_NUMBER() OVER (
                       PARTITION BY r.id
-                      ORDER BY t.discovery_order ASC, t.id DESC
+                      ORDER BY
+                        CASE WHEN t.next_action IS NOT NULL THEN 0 ELSE 1 END,
+                        t.discovery_order ASC,
+                        t.id DESC
                     ) AS rn
              FROM tags t
              JOIN repos r ON t.repo_id = r.id
@@ -400,8 +403,13 @@ def get_pending_tags(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.
            FROM ranked
            WHERE rn = 1
            ORDER BY
+             CASE
+               WHEN next_action IS NOT NULL THEN 1
+               WHEN complete_count = 0 THEN 2
+               WHEN is_dep_target THEN 3
+               ELSE 4
+             END,
              priority DESC,
-             CASE WHEN complete_count = 0 THEN 0 ELSE 1 END,
              repo_id
            LIMIT ?""",
         (limit,),

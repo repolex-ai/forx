@@ -133,6 +133,45 @@ class TestCliAddOrg(unittest.TestCase):
             "spider/lib-a",
         ])
 
+    def test_head_first_crawling_hierarchy(self):
+        # Repo 1: Already has a completed tag, but has an in-flight tag (Tier 1)
+        r_inflight = db.add_repo(self.conn, "org/inflight", priority=100)
+        t_comp = db.add_tags(self.conn, r_inflight, ["v1.0.0"])
+        db.mark_complete(self.conn, self.conn.execute("SELECT id FROM tags WHERE repo_id = ? AND git_tag = 'v1.0.0'", (r_inflight,)).fetchone()["id"])
+        db.add_tags(self.conn, r_inflight, ["v1.1.0"])
+        t_inf_id = self.conn.execute("SELECT id FROM tags WHERE repo_id = ? AND git_tag = 'v1.1.0'", (r_inflight,)).fetchone()["id"]
+        db.update_next_action(self.conn, t_inf_id, "enrich")
+
+        # Repo 2: Brand new unparsed repo @ priority 500 (Tier 2 - HEAD-first)
+        r_unparsed = db.add_repo(self.conn, "org/unparsed", priority=500)
+        db.add_tags(self.conn, r_unparsed, ["v2.0.0", "v1.9.0"])
+
+        # Repo 3: High-priority repo (priority 1000) that ALREADY has a completed tag, with unlinked historical tags (Tier 4)
+        r_hist = db.add_repo(self.conn, "org/already-parsed", priority=1000)
+        db.add_tags(self.conn, r_hist, ["v3.0.0", "v2.0.0"])
+        db.mark_complete(self.conn, self.conn.execute("SELECT id FROM tags WHERE repo_id = ? AND git_tag = 'v3.0.0'", (r_hist,)).fetchone()["id"])
+
+        # Repo 4: Repo with completed tag, but is an explicit dependency target (Tier 3 - linked historical)
+        r_target = db.add_repo(self.conn, "org/dep-target", priority=0)
+        db.add_tags(self.conn, r_target, ["v1.0.0", "v0.9.0"])
+        db.mark_complete(self.conn, self.conn.execute("SELECT id FROM tags WHERE repo_id = ? AND git_tag = 'v1.0.0'", (r_target,)).fetchone()["id"])
+        db.record_dependency(self.conn, r_unparsed, "org/dep-target", package_name="dep-target", ecosystem="PyPI")
+
+        pending = db.get_pending_tags(self.conn, limit=10)
+        pending_tuples = [(p["full_name"], p["git_tag"], p["next_action"]) for p in pending]
+
+        # Expected schedule:
+        # Tier 1: org/inflight @ v1.1.0 (in-flight mid-pipeline: next_action='enrich')
+        # Tier 2: org/unparsed @ v2.0.0 (HEAD-first unparsed repo, newest tag)
+        # Tier 3: org/dep-target @ v0.9.0 (linked historical tag: dependency target)
+        # Tier 4: org/already-parsed @ v2.0.0 (unlinked historical tag, even though priority=1000)
+        self.assertEqual(pending_tuples, [
+            ("org/inflight", "v1.1.0", "enrich"),
+            ("org/unparsed", "v2.0.0", None),
+            ("org/dep-target", "v0.9.0", None),
+            ("org/already-parsed", "v2.0.0", None),
+        ])
+
     @patch("forx.discover.discover_repo")
     def test_add_command_with_priority(self, mock_discover_repo):
         mock_discover_repo.return_value = ["v0.22.3", "v0.22.2"]
