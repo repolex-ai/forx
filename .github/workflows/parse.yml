@@ -40,18 +40,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
-          if ! gh repo view ${{ inputs.storage_repo }} &>/dev/null; then
-            VISIBILITY=$(gh repo view ${{ inputs.repo }} --json isPrivate --jq 'if .isPrivate then "--private" else "--public" end' 2>/dev/null || echo "--public")
-            gh repo create ${{ inputs.storage_repo }} \
-              $VISIBILITY \
-              --description "RDF parse data for ${{ inputs.repo }}" \
-              --homepage "https://github.com/${{ inputs.repo }}"
-          fi
-
-          git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ inputs.storage_repo }}.git" storage || {
-            mkdir storage && cd storage && git init
+          # Try cloning storage repo directly first (no API call, zero rate limit usage)
+          if ! git clone "https://x-access-token:${GH_TOKEN}@github.com/${{ inputs.storage_repo }}.git" storage 2>/dev/null; then
+            if ! gh repo view ${{ inputs.storage_repo }} &>/dev/null; then
+              VISIBILITY=$(gh repo view ${{ inputs.repo }} --json isPrivate --jq 'if .isPrivate then "--private" else "--public" end' 2>/dev/null || echo "--public")
+              gh repo create ${{ inputs.storage_repo }} \
+                $VISIBILITY \
+                --description "RDF parse data for ${{ inputs.repo }}" \
+                --homepage "https://github.com/${{ inputs.repo }}" || true
+            fi
+            mkdir -p storage && cd storage && git init
             git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ inputs.storage_repo }}.git"
-          }
+            cd ..
+          fi
 
           cd storage
           git config user.name "repolex-bot"
