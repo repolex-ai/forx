@@ -25,6 +25,8 @@ jobs:
   run:
     name: "${{ inputs.phase }} ${{ inputs.repo }}@${{ inputs.tag }} (parser_ref=${{ inputs.parser_ref }})"
     runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
 
     steps:
       - name: Checkout forx repo
@@ -93,7 +95,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.REPOLEX_PAT }}
         run: |
-          uv tool install "git+https://x-access-token:${GH_TOKEN}@github.com/repolex-ai/repolex-parser-py.git@${{ inputs.parser_ref }}"
+          uv tool install --python 3.12 "git+https://x-access-token:${GH_TOKEN}@github.com/repolex-ai/repolex-parser-py.git@${{ inputs.parser_ref }}"
           TOOL_PY=$(uv tool run --tool repolex python -c "import sys; print(sys.executable)" 2>/dev/null || echo "")
           if [ -n "$TOOL_PY" ]; then
             uv pip install --python "$TOOL_PY" "git+https://x-access-token:${GH_TOKEN}@github.com/repolex-ai/repolex-parser-py.git@${{ inputs.parser_ref }}#subdirectory=crates/repolex_core_rs" || echo "repolex_core_rs not available for ref ${{ inputs.parser_ref }}, using pure-Python fallback"
